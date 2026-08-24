@@ -15,7 +15,9 @@ from graphdb.store import GraphStore
 
 from ai_memory.embedder import get_embedder
 from ai_memory.memory import AgentMemory
-from ai_memory.schema import ENTITY, MEMORY, MemoryType
+from ai_memory.schema import AGENT, ENTITY, MEMORY, MemoryType
+
+from protocols.orchestrator import Orchestrator
 
 DEFAULT_PATH = os.environ.get(
     "GRAPHDB_WEB_PATH", "/home/ubuntu/graphdb/webui_graph.json"
@@ -53,6 +55,24 @@ class GraphService:
                 self.memory = AgentMemory(AGENT_ID, self.store, self.embedder)
             except Exception:
                 pass
+        # Orchestrator shares the SAME store + embedder so MCP/A2A activity is
+        # visible in the same graph view. Rehydrate any persisted agents.
+        self.orchestrator = Orchestrator(store=self.store, embedder=self.embedder)
+        self._rehydrate_agents()
+
+    def _rehydrate_agents(self) -> None:
+        """Recreate orchestrator agents from persisted AGENT nodes."""
+        for node in self.store.nodes_by_label(AGENT):
+            agent_id = node.properties.get("agent_id")
+            if not agent_id or agent_id == AGENT_ID:
+                continue
+            self.orchestrator.create_agent(
+                agent_id,
+                name=node.properties.get("name") or agent_id,
+                description=node.properties.get("description", ""),
+                skills=list(node.properties.get("skills", []) or []),
+                interests=list(node.properties.get("interests", []) or []),
+            )
 
     def reset(self) -> None:
         if os.path.exists(self.path):
@@ -263,6 +283,107 @@ class GraphService:
 
     def entities(self) -> List[Dict[str, Any]]:
         return [self.node_dict(n) for n in self.store.nodes_by_label(ENTITY)]
+
+    # ------------------------------------------------------- orchestration
+    def create_agent(
+        self,
+        agent_id: str,
+        name: Optional[str] = None,
+        description: str = "",
+        skills: Optional[List[str]] = None,
+        interests: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        agent = self.orchestrator.create_agent(
+            agent_id,
+            name=name,
+            description=description,
+            skills=skills or [],
+            interests=interests or [],
+        )
+        # Persist card metadata on the AGENT node so it survives save/load.
+        self.store.update_node(
+            agent.node_id,
+            {
+                "name": agent.card.name,
+                "description": agent.card.description,
+                "skills": list(agent.card.skills),
+                "interests": list(agent.card.interests),
+            },
+        )
+        return agent.card.to_dict()
+
+    def list_agents(self) -> List[Dict[str, Any]]:
+        return self.orchestrator.agents()
+
+    def agent_tools(self, agent_id: str) -> List[Dict[str, Any]]:
+        return self.orchestrator.tools(agent_id)
+
+    def agent_resources(self, agent_id: str) -> List[Dict[str, Any]]:
+        return self.orchestrator.resources(agent_id)
+
+    def mcp_call(self, agent_id: str, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return self.orchestrator.mcp_call(agent_id, tool, arguments or {})
+
+    def mcp_read_resource(self, agent_id: str, uri: str) -> Dict[str, Any]:
+        return self.orchestrator.read_resource(agent_id, uri)
+
+    def a2a_share(
+        self,
+        sender_id: str,
+        text: str,
+        topics: Optional[List[str]],
+        memory_type: Optional[str],
+        recipients: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        return self.orchestrator.a2a_share(
+            sender_id,
+            text,
+            topics=topics or [],
+            memory_type=_memory_type(memory_type),
+            recipients=recipients or None,
+        )
+
+    def a2a_send(
+        self, sender_id: str, recipient_id: str, content: Dict[str, Any], type: str = "text"
+    ) -> Dict[str, Any]:
+        return self.orchestrator.a2a_send(sender_id, recipient_id, content, type=type)
+
+    def a2a_preview(self, topics: List[str], text: str) -> List[Dict[str, Any]]:
+        return self.orchestrator.preview_interest(topics or [], text)
+
+    def a2a_messages(self, limit: int = 50) -> List[Dict[str, Any]]:
+        return self.orchestrator.messages(limit=limit)
+
+    def a2a_inbox(self, agent_id: str) -> List[Dict[str, Any]]:
+        return self.orchestrator.inbox(agent_id)
+
+    def mcp_call_log(self) -> List[Dict[str, Any]]:
+        return self.orchestrator.call_log()
+
+    def seed_agents(self) -> Dict[str, Any]:
+        """Create a couple of demo agents with overlapping interests."""
+        self.create_agent(
+            "researcher",
+            name="Researcher",
+            description="Finds and records facts.",
+            skills=["research", "summarize"],
+            interests=["databases", "machine learning"],
+        )
+        self.create_agent(
+            "engineer",
+            name="Engineer",
+            description="Builds and deploys systems.",
+            skills=["coding", "deployment"],
+            interests=["databases", "deployment"],
+        )
+        self.create_agent(
+            "chef",
+            name="Chef",
+            description="Unrelated interests, to show interest routing.",
+            skills=["cooking"],
+            interests=["cooking"],
+        )
+        return {"agents": self.list_agents()}
 
     # --------------------------------------------------------------- seed
     def seed(self) -> Dict[str, Any]:

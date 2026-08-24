@@ -106,6 +106,28 @@ tr.clickable:hover{background:var(--panel2);cursor:pointer}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{background:var(--chip);border:1px solid var(--border);border-radius:20px;padding:5px 12px;font-size:12px}
 
+/* Orchestration */
+.subtitle{font-size:13px;color:var(--muted);font-weight:400;margin-left:8px}
+.subhead{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;font-weight:600}
+.agents-list{display:flex;flex-direction:column;gap:10px}
+.agent-card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:12px}
+.agent-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.agent-desc{font-size:12px;color:var(--muted);margin:6px 0}
+.agent-meta{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0}
+.agent-stats{margin-top:4px}
+.chip.skill{color:var(--good);border-color:#1f3a2c}
+.chip.interest{color:var(--accent);border-color:#233152}
+.chip.resource{cursor:pointer;color:var(--accent2);border-color:#2e2650}
+.chip.resource:hover{border-color:var(--accent2)}
+.tool-desc{font-size:12px;color:var(--muted);margin:4px 0 8px}
+.tool-form{display:flex;flex-wrap:wrap;gap:6px}
+.tool-form .tool-arg{flex:1;min-width:120px;font-size:12px;padding:6px 9px}
+pre.json{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--text);
+  overflow:auto;max-height:260px;margin:0;white-space:pre-wrap;word-break:break-word}
+.result-card.err{border-color:var(--danger)}
+.tag.err{background:#3a1e1c;color:var(--danger)}
+
 /* Toast */
 .toast{position:fixed;top:18px;right:18px;background:var(--panel2);border:1px solid var(--border);
   color:var(--text);padding:12px 16px;border-radius:10px;opacity:0;transform:translateY(-8px);

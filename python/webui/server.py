@@ -16,11 +16,17 @@ from graphdb.exceptions import (
 )
 
 from .models import (
+    A2APreviewRequest,
+    A2ASendRequest,
+    A2AShareRequest,
+    AgentCreate,
     EdgeCreate,
+    MCPCallRequest,
     NodeCreate,
     NodeUpdate,
     RecallRequest,
     RememberRequest,
+    ResourceReadRequest,
     SearchRequest,
 )
 from .service import GraphService
@@ -170,6 +176,103 @@ def reflect():
 @app.get("/api/memory/entities")
 def entities():
     return service.entities()
+
+
+# ------------------------------------------------------- orchestration (MCP/A2A)
+@app.get("/api/agents")
+def list_agents():
+    return service.list_agents()
+
+
+@app.post("/api/agents")
+def create_agent(body: AgentCreate):
+    if not body.agent_id.strip():
+        raise HTTPException(status_code=400, detail="agent_id is required")
+    return service.create_agent(
+        body.agent_id.strip(),
+        name=body.name,
+        description=body.description,
+        skills=body.skills,
+        interests=body.interests,
+    )
+
+
+@app.get("/api/agents/{agent_id}/tools")
+def agent_tools(agent_id: str):
+    try:
+        return service.agent_tools(agent_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+
+@app.get("/api/agents/{agent_id}/resources")
+def agent_resources(agent_id: str):
+    try:
+        return service.agent_resources(agent_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+
+@app.get("/api/agents/{agent_id}/inbox")
+def agent_inbox(agent_id: str):
+    try:
+        return service.a2a_inbox(agent_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+
+@app.post("/api/mcp/call")
+def mcp_call(body: MCPCallRequest):
+    try:
+        return service.mcp_call(body.agent_id, body.tool, body.arguments)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+
+@app.post("/api/mcp/resource")
+def mcp_resource(body: ResourceReadRequest):
+    try:
+        return service.mcp_read_resource(body.agent_id, body.uri)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+
+@app.get("/api/mcp/log")
+def mcp_log():
+    return service.mcp_call_log()
+
+
+@app.post("/api/a2a/share")
+def a2a_share(body: A2AShareRequest):
+    try:
+        return service.a2a_share(
+            body.sender_id, body.text, body.topics, body.memory_type, body.recipients
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+
+@app.post("/api/a2a/send")
+def a2a_send(body: A2ASendRequest):
+    try:
+        return service.a2a_send(body.sender_id, body.recipient_id, body.content, body.type)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+
+@app.post("/api/a2a/preview")
+def a2a_preview(body: A2APreviewRequest):
+    return service.a2a_preview(body.topics, body.text)
+
+
+@app.get("/api/a2a/messages")
+def a2a_messages(limit: int = 50):
+    return service.a2a_messages(limit=limit)
+
+
+@app.post("/api/seed_agents")
+def seed_agents():
+    return service.seed_agents()
 
 
 # ----------------------------------------------------------------- admin
