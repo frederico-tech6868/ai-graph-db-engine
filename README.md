@@ -25,6 +25,20 @@ vector (embedding) similarity search, an AI agent memory layer, and a Rust port.
 - Semantic deduplication scoped strictly to `Memory` nodes
 - `GraphAgent` chat pipeline + OpenAI function-calling tool schemas
 
+## Web UI (`python/webui/`)
+A FastAPI backend + single-page management console for setup & management:
+- Interactive graph visualization (vis-network), color-coded by label
+- Node / edge CRUD, with the **label-scoped edge similarity scan surfaced in the UI**
+- Cosine similarity search scoped to a chosen label
+- AI memory panel (remember / recall / reflect, with duplicate detection)
+- Seed / save / load / reset admin controls
+
+```bash
+cd python
+pip install -r requirements.txt
+python -m webui.run          # http://localhost:3000
+```
+
 ## Phase 3 — Rust Engine (`rust/`)
 - Production-quality Rust re-implementation of the core engine
 - `parking_lot::RwLock`, `serde` persistence, min-heap top-k search

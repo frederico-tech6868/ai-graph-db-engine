@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Graph DB Engine — Management Console</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>
+        <div class="brand-title">GraphDB</div>
+        <div class="brand-sub">Management Console</div>
+      </div>
+    </div>
+    <nav>
+      <button class="nav-btn active" data-view="dashboard">▦ Dashboard</button>
+      <button class="nav-btn" data-view="nodes">● Nodes</button>
+      <button class="nav-btn" data-view="edges">⇄ Edges</button>
+      <button class="nav-btn" data-view="search">⌕ Similarity Search</button>
+      <button class="nav-btn" data-view="memory">✦ AI Memory</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="backend-pill">Backend: <span id="backend">…</span></div>
+      <div class="admin-row">
+        <button id="btn-seed" class="mini">Seed demo</button>
+        <button id="btn-save" class="mini">Save</button>
+        <button id="btn-load" class="mini">Load</button>
+        <button id="btn-reset" class="mini danger">Reset</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="content">
+    <!-- DASHBOARD -->
+    <section id="view-dashboard" class="view active">
+      <h1>Dashboard</h1>
+      <div class="stat-grid">
+        <div class="stat-card"><div class="stat-num" id="stat-nodes">0</div><div class="stat-label">Nodes</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat-edges">0</div><div class="stat-label">Edges</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat-labels">0</div><div class="stat-label">Labels</div></div>
+        <div class="stat-card"><div class="stat-num" id="stat-memories">0</div><div class="stat-label">Memories</div></div>
+      </div>
+      <div class="panel-row">
+        <div class="panel graph-panel">
+          <div class="panel-head">
+            <h2>Graph Visualization</h2>
+            <div class="panel-actions">
+              <select id="graph-label-filter"><option value="">All labels</option></select>
+              <button id="btn-refresh-graph" class="mini">Refresh</button>
+            </div>
+          </div>
+          <div id="graph"></div>
+          <div class="legend" id="legend"></div>
+        </div>
+        <div class="panel side-panel">
+          <div class="panel-head"><h2>Details</h2></div>
+          <div id="node-detail" class="detail-empty">Click a node to inspect it.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- NODES -->
+    <section id="view-nodes" class="view">
+      <h1>Nodes</h1>
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h2>Add Node</h2></div>
+          <div class="form">
+            <label>Label</label>
+            <input id="node-label" placeholder="e.g. User" />
+            <label>Text (embedded for similarity — optional)</label>
+            <input id="node-text" placeholder="e.g. Alice ML Engineer" />
+            <label>Properties</label>
+            <div id="node-props"></div>
+            <button class="mini" id="btn-add-prop">+ property</button>
+            <button class="primary" id="btn-add-node">Add Node</button>
+          </div>
+        </div>
+        <div class="panel grow">
+          <div class="panel-head">
+            <h2>All Nodes</h2>
+            <div class="panel-actions">
+              <select id="nodes-label-filter"><option value="">All labels</option></select>
+            </div>
+          </div>
+          <div class="table-wrap"><table id="nodes-table"><thead><tr><th>Label</th><th>Properties</th><th>Emb</th><th></th></tr></thead><tbody></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- EDGES -->
+    <section id="view-edges" class="view">
+      <h1>Edges</h1>
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h2>Add Edge</h2></div>
+          <div class="form">
+            <label>Source node</label>
+            <select id="edge-src"></select>
+            <label>Destination node</label>
+            <select id="edge-dst"></select>
+            <label>Edge label</label>
+            <input id="edge-label" placeholder="e.g. WORKS_AT" />
+            <label>Weight</label>
+            <input id="edge-weight" type="number" value="1.0" step="0.1" />
+            <label>Similarity threshold: <span id="thr-val">0.85</span></label>
+            <input id="edge-thr" type="range" min="0" max="1" step="0.01" value="0.85" />
+            <button class="primary" id="btn-add-edge">Add Edge (scan first)</button>
+            <div id="edge-scan-result"></div>
+          </div>
+        </div>
+        <div class="panel grow">
+          <div class="panel-head"><h2>All Edges</h2></div>
+          <div class="table-wrap"><table id="edges-table"><thead><tr><th>Label</th><th>Source → Dest</th><th>W</th><th></th></tr></thead><tbody></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SEARCH -->
+    <section id="view-search" class="view">
+      <h1>Similarity Search</h1>
+      <div class="panel">
+        <p class="hint">Vector search uses <b>cosine similarity</b>. Choosing a label restricts the
+          scan strictly to nodes of that type — e.g. a <code>User</code> is only compared to other
+          <code>User</code> nodes.</p>
+        <div class="search-bar">
+          <input id="search-text" placeholder="Type a query, e.g. 'machine learning engineer'" />
+          <select id="search-label"><option value="">All labels</option></select>
+          <input id="search-k" type="number" value="5" min="1" max="50" title="top k" />
+          <button class="primary" id="btn-search">Search</button>
+        </div>
+        <div id="search-results" class="results"></div>
+      </div>
+    </section>
+
+    <!-- MEMORY -->
+    <section id="view-memory" class="view">
+      <h1>AI Agent Memory</h1>
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h2>Remember</h2></div>
+          <div class="form">
+            <label>Memory text</label>
+            <textarea id="mem-text" placeholder="e.g. Alice works at TechCorp on ML."></textarea>
+            <label>Type</label>
+            <select id="mem-type">
+              <option value="observation">observation</option>
+              <option value="fact">fact</option>
+              <option value="reflection">reflection</option>
+              <option value="plan">plan</option>
+              <option value="emotion">emotion</option>
+            </select>
+            <label>Entities (comma-separated)</label>
+            <input id="mem-entities" placeholder="Alice, TechCorp" />
+            <button class="primary" id="btn-remember">Remember</button>
+            <div id="remember-result"></div>
+          </div>
+        </div>
+        <div class="panel grow">
+          <div class="panel-head">
+            <h2>Recall</h2>
+            <div class="panel-actions"><button id="btn-reflect" class="mini">Reflect</button></div>
+          </div>
+          <div class="search-bar">
+            <input id="recall-query" placeholder="What do you know about TechCorp?" />
+            <input id="recall-k" type="number" value="5" min="1" max="50" />
+            <button class="primary" id="btn-recall">Recall</button>
+          </div>
+          <div id="recall-results" class="results"></div>
+          <div class="panel-head" style="margin-top:18px"><h2>Entities</h2></div>
+          <div id="entities-list" class="chips"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

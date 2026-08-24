@@ -10,3 +10,4 @@ target/
 *.so
 # OS
 .DS_Store
+webui_graph.json
