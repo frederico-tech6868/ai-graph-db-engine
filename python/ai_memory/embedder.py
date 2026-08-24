@@ -5,6 +5,10 @@ Two implementations are provided:
 * :class:`OpenAIEmbedder` uses the ``openai`` package when it is installed and
   ``OPENAI_API_KEY`` is set. It calls the embeddings endpoint (default model
   ``text-embedding-3-small``).
+* :class:`OllamaEmbedder` talks to a **local Ollama** server (default
+  ``http://localhost:11434``) using only the standard library, so you get real
+  neural embeddings from a locally-hosted model (e.g. ``nomic-embed-text``)
+  with no cloud API and no extra Python dependencies.
 * :class:`LocalEmbedder` is a pure-Python, dependency-free, *deterministic*
   fallback. It hashes character n-grams of each token into a fixed-size vector
   with tf-idf-like weighting and L2-normalises the result. It requires no ML
@@ -142,13 +146,138 @@ class OpenAIEmbedder(Embedder):
         return [list(item.embedding) for item in resp.data]
 
 
-def get_embedder(prefer_openai: bool = True) -> Embedder:
+class OllamaEmbedder(Embedder):
+    """Embedder backed by a **local Ollama** server.
+
+    Uses only the Python standard library (``urllib``) to POST to Ollama's
+    embeddings endpoint, so no extra packages are required. Point it at any
+    embedding model you have pulled locally, e.g.::
+
+        ollama pull nomic-embed-text
+
+    Parameters
+    ----------
+    model:
+        Ollama model name (default ``nomic-embed-text``, or the
+        ``OLLAMA_EMBED_MODEL`` env var).
+    host:
+        Base URL of the Ollama server (default ``http://localhost:11434`` or the
+        ``OLLAMA_HOST`` env var).
+    timeout:
+        Per-request timeout in seconds.
+
+    The vector dimensionality is discovered automatically on construction by
+    embedding a short probe string. A ``RuntimeError`` is raised if the server
+    is unreachable or the model is not available (mirroring
+    :class:`OpenAIEmbedder`), so callers can fall back gracefully.
+    """
+
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        host: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self.model = model or os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        base = host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        self.host = base.rstrip("/")
+        self.timeout = timeout
+
+        # Probe once to validate connectivity and learn the dimensionality.
+        try:
+            probe = self._embed_one("dimension probe")
+        except Exception as exc:  # pragma: no cover - depends on local env
+            raise RuntimeError(
+                f"could not reach Ollama at {self.host} with model "
+                f"'{self.model}': {exc}"
+            ) from exc
+        if not probe:
+            raise RuntimeError(
+                f"Ollama model '{self.model}' returned an empty embedding"
+            )
+        self.dim = len(probe)
+
+    def _embed_one(self, text: str) -> List[float]:
+        import json
+        import urllib.request
+
+        payload = json.dumps(
+            {"model": self.model, "prompt": text if text else " "}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.host}/api/embeddings",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return [float(x) for x in data.get("embedding", [])]
+
+    def embed(self, text: str) -> List[float]:
+        return self._embed_one(text)
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        return [self._embed_one(t) for t in texts]
+
+
+def ollama_chat(
+    prompt: str,
+    model: Optional[str] = None,
+    host: Optional[str] = None,
+    system: Optional[str] = None,
+    timeout: float = 120.0,
+) -> str:
+    """Send a one-shot prompt to a **local Ollama** chat model and return text.
+
+    Standard-library only. Handy for giving agents a local LLM (e.g. to write
+    richer reflections) without any cloud dependency::
+
+        ollama pull llama3.2
+        ollama_chat("Summarise the plan", model="llama3.2")
+
+    Uses ``OLLAMA_CHAT_MODEL`` / ``OLLAMA_HOST`` env vars as defaults.
+    """
+    import json
+    import urllib.request
+
+    mdl = model or os.environ.get("OLLAMA_CHAT_MODEL", "llama3.2")
+    base = (host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = json.dumps(
+        {"model": mdl, "messages": messages, "stream": False}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return (data.get("message") or {}).get("content", "")
+
+
+def get_embedder(prefer_openai: bool = True, prefer_ollama: bool = False) -> Embedder:
     """Return the best available embedder.
 
-    Returns an :class:`OpenAIEmbedder` when ``prefer_openai`` is true and both
-    the ``openai`` package and ``OPENAI_API_KEY`` are available; otherwise a
-    :class:`LocalEmbedder`.
+    Selection order:
+
+    1. :class:`OllamaEmbedder` when ``prefer_ollama`` is true (or the
+       ``USE_OLLAMA`` env var is set) and a local Ollama server is reachable.
+    2. :class:`OpenAIEmbedder` when ``prefer_openai`` is true and both the
+       ``openai`` package and ``OPENAI_API_KEY`` are available.
+    3. :class:`LocalEmbedder` (always-available deterministic fallback).
     """
+    if prefer_ollama or os.environ.get("USE_OLLAMA"):
+        try:
+            return OllamaEmbedder()
+        except Exception:
+            pass
     if prefer_openai and os.environ.get("OPENAI_API_KEY"):
         try:
             return OpenAIEmbedder()
@@ -157,4 +286,11 @@ def get_embedder(prefer_openai: bool = True) -> Embedder:
     return LocalEmbedder()
 
 
-__all__ = ["Embedder", "LocalEmbedder", "OpenAIEmbedder", "get_embedder"]
+__all__ = [
+    "Embedder",
+    "LocalEmbedder",
+    "OpenAIEmbedder",
+    "OllamaEmbedder",
+    "ollama_chat",
+    "get_embedder",
+]
