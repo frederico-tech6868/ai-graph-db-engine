@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "graphdb_rs"
+version = "0.1.0"
+description = "Rust port of the graphdb core engine with a PyO3 Python bridge"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# Build the `graphdb_rs` extension module defined by the #[pymodule] in src/lib.rs.
+features = ["pyo3/extension-module"]

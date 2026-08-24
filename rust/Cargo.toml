@@ -1,0 +1,20 @@
+[package]
+name = "graphdb_rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the graphdb core engine with a PyO3 Python bridge"
+license = "MIT"
+
+[lib]
+name = "graphdb_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.6", features = ["v4"] }
+parking_lot = "0.12"
+thiserror = "1.0"
+
+[dev-dependencies]
