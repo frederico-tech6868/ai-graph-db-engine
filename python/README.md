@@ -204,6 +204,53 @@ API, and a persistence save/load round-trip.
 
 ---
 
+## Agent interoperability — MCP & A2A
+
+On top of the graph memory, the `protocols/` package adds two
+agent-interoperability protocols. Both run fully in-process and offline and
+share a single `GraphStore`, so all activity is visible in the web UI and
+searchable with the label-scoped vector engine.
+
+| Protocol | Meaning | Summary |
+|----------|---------|---------|
+| **MCP** — *Model Context Protocol* | Agent → **Tools & Data** | Exposes an agent's memory as callable **tools** and readable **resources**. |
+| **A2A** — *Agent-to-Agent* | Agent → **Agent** | Agents advertise **interests** and share **memories of interest**, interest-routed by topic overlap or embedding similarity. |
+
+```
+protocols/
+  schema.py        New labels (Tool, Resource, Topic) + provenance edges
+  mcp.py           MCPServer / MCPClient + build_memory_mcp_server()
+  a2a.py           AgentCard, A2AMessage, A2AAgent, A2ABus (interest routing)
+  orchestrator.py  Orchestrator facade tying MCP + A2A over one shared graph
+```
+
+### Quick start
+
+```python
+from protocols import Orchestrator
+
+orc = Orchestrator()                      # shared graph, offline embedder
+orc.create_agent("researcher", interests=["databases", "machine learning"])
+orc.create_agent("engineer",   interests=["databases", "deployment"])
+
+# MCP: an agent records a fact via a tool
+orc.mcp_call("researcher", "remember_fact",
+             {"text": "Label-scoped vector indexes cut latency 10x."})
+
+# A2A: share a memory of interest — routed to interested peers only
+orc.a2a_share("researcher", "Adopt label-scoped vector indexes.",
+              topics=["databases"])       # -> delivered to engineer
+
+# the engineer can now recall it through its OWN MCP tool
+orc.mcp_call("engineer", "recall_memories", {"query": "vector index"})
+```
+
+Runnable, narrated examples live in [`examples/`](examples/) — `example_mcp.py`,
+`example_a2a.py`, and `example_orchestration.py`. The same capabilities are
+available interactively in the **Orchestration** tab of the web console.
+
+---
+
 ## Design constraints honoured
 
 1. No external graph-DB libraries.

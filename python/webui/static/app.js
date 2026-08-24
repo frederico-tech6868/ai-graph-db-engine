@@ -51,6 +51,7 @@ $$(".nav-btn").forEach((btn) =>
     if (btn.dataset.view === "edges") loadEdges();
     if (btn.dataset.view === "search") refreshLabelSelects();
     if (btn.dataset.view === "memory") loadMemory();
+    if (btn.dataset.view === "orchestration") loadOrchestration();
   })
 );
 
@@ -316,6 +317,167 @@ $("#btn-reflect").addEventListener("click", async () => {
     toast("Reflection generated"); loadMemory();
   } catch (e) { toast(e.message, "bad"); }
 });
+
+// ---------------------------------------------------------------- orchestration
+let AGENTS_CACHE = [];
+async function loadOrchestration() {
+  AGENTS_CACHE = await api("/api/agents");
+  renderAgents();
+  const opts = AGENTS_CACHE.map((a) => `<option value="${a.agent_id}">${a.name || a.agent_id}</option>`).join("");
+  ["#mcp-agent", "#a2a-sender"].forEach((sel) => {
+    const el = $(sel); if (!el) return; const cur = el.value;
+    el.innerHTML = opts || `<option value="">— no agents —</option>`;
+    if (cur) el.value = cur;
+  });
+  if (AGENTS_CACHE.length) loadMcp(AGENTS_CACHE[0].agent_id);
+  else { $("#mcp-tools").innerHTML = `<div class="mono">Create or seed agents to begin.</div>`; $("#mcp-resources").innerHTML = ""; }
+  loadFeed();
+}
+
+function renderAgents() {
+  $("#agents-list").innerHTML = AGENTS_CACHE.length ? AGENTS_CACHE.map((a) => `
+    <div class="agent-card">
+      <div class="agent-top"><b>${a.name || a.agent_id}</b><span class="mono">${a.agent_id}</span></div>
+      ${a.description ? `<div class="agent-desc">${a.description}</div>` : ""}
+      <div class="agent-meta">
+        ${(a.skills || []).map((s) => `<span class="chip skill">🛠 ${s}</span>`).join("")}
+        ${(a.interests || []).map((s) => `<span class="chip interest">★ ${s}</span>`).join("")}
+      </div>
+      <div class="agent-stats mono">memories: ${a.owned_memories ?? 0} · inbox: ${a.inbox ?? 0}</div>
+    </div>`).join("") : `<div class="mono">No agents yet. Click "Seed agents".</div>`;
+}
+
+async function loadMcp(agentId) {
+  if (!agentId) return;
+  $("#mcp-agent").value = agentId;
+  const [tools, resources] = await Promise.all([
+    api(`/api/agents/${agentId}/tools`),
+    api(`/api/agents/${agentId}/resources`),
+  ]);
+  $("#mcp-tools").innerHTML = tools.map((t) => {
+    const props = (t.inputSchema && t.inputSchema.properties) || {};
+    const fields = Object.entries(props).map(([k, spec]) =>
+      `<input class="tool-arg" data-tool="${t.name}" data-key="${k}"
+        placeholder="${k}${(t.inputSchema.required || []).includes(k) ? " *" : ""} (${spec.type || "any"})" />`).join("");
+    return `<div class="result-card">
+      <div class="result-head"><span><b>${t.name}</b></span>
+        <button class="mini" onclick="callTool('${agentId}','${t.name}')">Call</button></div>
+      <div class="tool-desc">${t.description || ""}</div>
+      <div class="tool-form">${fields || '<span class="mono">no arguments</span>'}</div>
+    </div>`;
+  }).join("") || `<div class="mono">no tools</div>`;
+  $("#mcp-resources").innerHTML = resources.map((r) =>
+    `<span class="chip resource" onclick="readResource('${agentId}','${r.uri}')" title="${r.description || ""}">📄 ${r.uri}</span>`
+  ).join("") || `<div class="mono">no resources</div>`;
+}
+
+$("#mcp-agent").addEventListener("change", (e) => loadMcp(e.target.value));
+
+window.callTool = async function (agentId, tool) {
+  const args = {};
+  $$(`.tool-arg[data-tool="${tool}"]`).forEach((el) => {
+    let v = el.value.trim();
+    if (v === "") return;
+    if (/^-?\d+$/.test(v)) v = parseInt(v);
+    else if (/^-?\d*\.\d+$/.test(v)) v = parseFloat(v);
+    else if (v.includes(",") && el.dataset.key === "entities") v = v.split(",").map((s) => s.trim()).filter(Boolean);
+    args[el.dataset.key] = v;
+  });
+  try {
+    const res = await api("/api/mcp/call", { method: "POST", body: JSON.stringify({ agent_id: agentId, tool, arguments: args }) });
+    renderMcpResult(`${tool} →`, res);
+    toast(res.isError ? "Tool error" : "Tool called", res.isError ? "bad" : "good");
+    AGENTS_CACHE = await api("/api/agents"); renderAgents();
+  } catch (e) { toast(e.message, "bad"); }
+};
+
+window.readResource = async function (agentId, uri) {
+  try {
+    const res = await api("/api/mcp/resource", { method: "POST", body: JSON.stringify({ agent_id: agentId, uri }) });
+    renderMcpResult(`${uri} →`, res);
+  } catch (e) { toast(e.message, "bad"); }
+};
+
+function renderMcpResult(title, res) {
+  const data = res.structuredContent !== undefined ? res.structuredContent : res;
+  $("#mcp-result").innerHTML = `<div class="result-card ${res.isError ? "err" : ""}">
+    <div class="result-head"><b>${title}</b>${res.isError ? '<span class="tag err">error</span>' : ""}</div>
+    <pre class="json">${escapeHtml(JSON.stringify(data, null, 2))}</pre></div>`;
+}
+
+$("#btn-create-agent").addEventListener("click", async () => {
+  const agent_id = $("#ag-id").value.trim();
+  if (!agent_id) return toast("Agent id required", "bad");
+  const body = {
+    agent_id,
+    name: $("#ag-name").value.trim() || agent_id,
+    skills: $("#ag-skills").value.split(",").map((s) => s.trim()).filter(Boolean),
+    interests: $("#ag-interests").value.split(",").map((s) => s.trim()).filter(Boolean),
+  };
+  try {
+    await api("/api/agents", { method: "POST", body: JSON.stringify(body) });
+    toast("Agent created");
+    ["#ag-id", "#ag-name", "#ag-skills", "#ag-interests"].forEach((s) => ($(s).value = ""));
+    loadOrchestration();
+  } catch (e) { toast(e.message, "bad"); }
+});
+
+$("#btn-seed-agents").addEventListener("click", async () => {
+  try { await api("/api/seed_agents", { method: "POST" }); toast("Demo agents created"); loadOrchestration(); }
+  catch (e) { toast(e.message, "bad"); }
+});
+
+$("#btn-a2a-preview").addEventListener("click", async () => {
+  const text = $("#a2a-text").value.trim();
+  const topics = $("#a2a-topics").value.split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    const res = await api("/api/a2a/preview", { method: "POST", body: JSON.stringify({ topics, text }) });
+    $("#a2a-share-result").innerHTML = res.length
+      ? `<div class="flag ok"><h4>Would route to ${res.length} agent(s)</h4>` +
+        res.map((r) => `<div class="match">${r.agent_id} — ${r.reason} (${r.score})</div>`).join("") + `</div>`
+      : `<div class="flag"><h4>No interested agents match</h4></div>`;
+  } catch (e) { toast(e.message, "bad"); }
+});
+
+$("#btn-a2a-share").addEventListener("click", async () => {
+  const sender_id = $("#a2a-sender").value;
+  const text = $("#a2a-text").value.trim();
+  if (!sender_id) return toast("Pick a sender", "bad");
+  if (!text) return toast("Enter memory text", "bad");
+  const topics = $("#a2a-topics").value.split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    const res = await api("/api/a2a/share", { method: "POST", body: JSON.stringify({ sender_id, text, topics }) });
+    const box = $("#a2a-share-result");
+    box.innerHTML = res.delivered_to.length
+      ? `<div class="flag ok"><h4>✓ Routed to ${res.delivered_to.length} agent(s)${res.was_duplicate ? " (near-duplicate memory)" : ""}</h4>` +
+        res.delivered_to.map((d) => `<div class="match">${d.agent_id} — ${d.reason} (${d.score})</div>`).join("") + `</div>`
+      : `<div class="flag"><h4>Published, but no interested peers</h4></div>`;
+    toast("Memory shared");
+    $("#a2a-text").value = ""; $("#a2a-topics").value = "";
+    AGENTS_CACHE = await api("/api/agents"); renderAgents();
+    loadFeed();
+  } catch (e) { toast(e.message, "bad"); }
+});
+
+$("#btn-refresh-feed").addEventListener("click", loadFeed);
+
+async function loadFeed() {
+  const msgs = await api("/api/a2a/messages?limit=50");
+  $("#a2a-feed").innerHTML = msgs.length ? msgs.slice().reverse().map((m) => {
+    const c = m.content || {};
+    const detail = m.type === "memory_share"
+      ? `<div>"${(c.text || "").slice(0, 90)}"</div>
+         <div class="mono">topics: ${(c.topics || []).join(", ") || "—"} · ${c.match_reason || ""} (${c.match_score ?? ""})</div>`
+      : `<div class="mono">${escapeHtml(JSON.stringify(c))}</div>`;
+    return `<div class="result-card">
+      <div class="result-head"><span><span class="tag">${m.type}</span> ${m.sender_id} → ${m.recipient_id}</span></div>
+      ${detail}</div>`;
+  }).join("") : `<div class="mono">no messages yet — share a memory to see routing</div>`;
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
 
 // ---------------------------------------------------------------- admin
 $("#btn-seed").addEventListener("click", async () => {

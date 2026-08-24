@@ -50,3 +50,43 @@ class RecallRequest(BaseModel):
     query: str
     k: int = 5
     memory_type: Optional[str] = None
+
+
+# ---------------------------------------------------- orchestration (MCP/A2A)
+class AgentCreate(BaseModel):
+    agent_id: str
+    name: Optional[str] = None
+    description: str = ""
+    skills: List[str] = Field(default_factory=list)
+    interests: List[str] = Field(default_factory=list)
+
+
+class MCPCallRequest(BaseModel):
+    agent_id: str
+    tool: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResourceReadRequest(BaseModel):
+    agent_id: str
+    uri: str
+
+
+class A2AShareRequest(BaseModel):
+    sender_id: str
+    text: str
+    topics: List[str] = Field(default_factory=list)
+    memory_type: Optional[str] = None
+    recipients: Optional[List[str]] = None
+
+
+class A2ASendRequest(BaseModel):
+    sender_id: str
+    recipient_id: str
+    content: Dict[str, Any] = Field(default_factory=dict)
+    type: str = "text"
+
+
+class A2APreviewRequest(BaseModel):
+    topics: List[str] = Field(default_factory=list)
+    text: str = ""

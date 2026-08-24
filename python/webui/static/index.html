@@ -24,6 +24,7 @@
       <button class="nav-btn" data-view="edges">⇄ Edges</button>
       <button class="nav-btn" data-view="search">⌕ Similarity Search</button>
       <button class="nav-btn" data-view="memory">✦ AI Memory</button>
+      <button class="nav-btn" data-view="orchestration">⇆ Orchestration</button>
     </nav>
     <div class="sidebar-footer">
       <div class="backend-pill">Backend: <span id="backend">…</span></div>
@@ -175,6 +176,84 @@
           <div id="recall-results" class="results"></div>
           <div class="panel-head" style="margin-top:18px"><h2>Entities</h2></div>
           <div id="entities-list" class="chips"></div>
+        </div>
+      </div>
+    </section>
+    <!-- ORCHESTRATION (MCP + A2A) -->
+    <section id="view-orchestration" class="view">
+      <h1>Agent Orchestration <span class="subtitle">MCP tools &amp; data · A2A shared memories</span></h1>
+      <p class="hint">
+        <b>MCP</b> (Agent → Tools &amp; Data) exposes each agent's memory as callable
+        <b>tools</b> and readable <b>resources</b>. <b>A2A</b> (Agent → Agent) lets agents
+        advertise <b>interests</b> and share <b>memories of interest</b>, which the bus routes to
+        peers by topic overlap or embedding similarity. Everything lands in the same graph.
+      </p>
+
+      <div class="panel-row">
+        <!-- Agents column -->
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Agents</h2>
+            <div class="panel-actions"><button id="btn-seed-agents" class="mini">Seed agents</button></div>
+          </div>
+          <div id="agents-list" class="agents-list"></div>
+          <div class="panel-head" style="margin-top:16px"><h2>Register agent</h2></div>
+          <div class="form">
+            <label>Agent id</label>
+            <input id="ag-id" placeholder="e.g. researcher" />
+            <label>Name</label>
+            <input id="ag-name" placeholder="e.g. Researcher" />
+            <label>Skills (comma-separated)</label>
+            <input id="ag-skills" placeholder="research, summarize" />
+            <label>Interests / topics (comma-separated)</label>
+            <input id="ag-interests" placeholder="databases, machine learning" />
+            <button class="primary" id="btn-create-agent">Create Agent</button>
+          </div>
+        </div>
+
+        <!-- MCP column -->
+        <div class="panel grow">
+          <div class="panel-head">
+            <h2>MCP — Tools &amp; Data</h2>
+            <div class="panel-actions">
+              <select id="mcp-agent"></select>
+            </div>
+          </div>
+          <div class="subhead">Tools</div>
+          <div id="mcp-tools" class="results"></div>
+          <div class="subhead" style="margin-top:12px">Resources</div>
+          <div id="mcp-resources" class="chips"></div>
+          <div class="subhead" style="margin-top:12px">Result</div>
+          <div id="mcp-result" class="results"><div class="mono">Invoke a tool or read a resource.</div></div>
+        </div>
+      </div>
+
+      <div class="panel-row">
+        <!-- A2A share -->
+        <div class="panel">
+          <div class="panel-head"><h2>A2A — Share a memory of interest</h2></div>
+          <div class="form">
+            <label>Sender</label>
+            <select id="a2a-sender"></select>
+            <label>Memory text</label>
+            <textarea id="a2a-text" placeholder="e.g. New vector index speeds up graph databases"></textarea>
+            <label>Topics (comma-separated)</label>
+            <input id="a2a-topics" placeholder="databases" />
+            <div class="panel-actions">
+              <button class="mini" id="btn-a2a-preview">Preview recipients</button>
+              <button class="primary" id="btn-a2a-share" style="margin-top:0">Publish &amp; Route</button>
+            </div>
+            <div id="a2a-share-result"></div>
+          </div>
+        </div>
+
+        <!-- A2A feed -->
+        <div class="panel grow">
+          <div class="panel-head">
+            <h2>A2A — Message feed</h2>
+            <div class="panel-actions"><button id="btn-refresh-feed" class="mini">Refresh</button></div>
+          </div>
+          <div id="a2a-feed" class="results"></div>
         </div>
       </div>
     </section>
