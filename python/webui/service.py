@@ -39,7 +39,9 @@ class GraphService:
 
     def __init__(self, path: str = DEFAULT_PATH) -> None:
         self.path = path
+        # Honors USE_OLLAMA (local Ollama) / OPENAI_API_KEY, else offline LocalEmbedder.
         self.embedder = get_embedder()
+        print(f"[webui] embedder backend: {type(self.embedder).__name__}")
         self._init_store(load=os.path.exists(path))
 
     # ------------------------------------------------------------- lifecycle
