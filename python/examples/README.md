@@ -24,6 +24,7 @@ python examples/example_a2a.py             # A2A interest-routed memory sharing
 python examples/example_orchestration.py   # both, via the Orchestrator facade
 python examples/example_project_layers.py  # one agent per AI layer, full PIV run
 python examples/example_ollama.py          # use local Ollama models for embeddings/chat
+python examples/example_ollama_context.py  # keep an Ollama model within its 64k-256k window
 ```
 
 Each script is self-contained and prints a narrated walkthrough.
@@ -112,6 +113,47 @@ orch = Orchestrator(embedder=OllamaEmbedder(model="nomic-embed-text"))
 # or auto-select (Ollama -> OpenAI -> LocalEmbedder)
 orch = Orchestrator(embedder=get_embedder(prefer_ollama=True))
 ```
+
+### `example_ollama_context.py`
+Shows how to keep a local **Ollama model within its context window** (64k / 128k
+/ 256k) so it **never overflows** — using the graph engine as unbounded
+long-term memory.
+
+The `ai_memory.context_window.ContextManager` sits between your model and the
+graph and, every turn:
+
+1. **Budgets** the window — reserves space for the system prompt and the model's
+   reply, then splits the rest between *retrieved memories* and the *live
+   transcript* (`ContextBudget`).
+2. **Retrieves** only the top memories relevant to the current message
+   (label-scoped vector search) and packs them to the memory sub-budget.
+3. **Rolls up overflow** — when the transcript grows past its sub-budget, the
+   oldest turns are summarised (via a local Ollama chat model, or a
+   deterministic offline fallback) and written **back into the graph as
+   memory**, then dropped from the live prompt.
+
+The assembled prompt's measured token count is *guaranteed* `<= num_ctx`
+regardless of conversation length. The example simulates a long chat that would
+otherwise blow a 64k window and confirms the peak stays under the limit.
+
+```python
+from ai_memory.context_window import ContextBudget, ContextManager
+
+budget = ContextBudget(context_limit=262_144)   # 256k model
+ctx = ContextManager(memory, budget=budget)
+
+assembled, history = ctx.assemble(user_message, system_prompt, history)
+reply = my_ollama_generate(assembled.to_messages())  # always fits num_ctx
+ctx.ingest_turn(user_message, reply)                 # persist to the graph
+```
+
+| `ContextBudget` field | Meaning |
+|-----------------------|---------|
+| `context_limit` | your model's `num_ctx` (65536 / 131072 / 262144) |
+| `reserve_response` | tokens held back for the model's reply |
+| `reserve_system` | tokens held back for the system prompt |
+| `memory_fraction` | share of the working area given to retrieved memory |
+| `chars_per_token` | heuristic for the default token counter (override with your own tokenizer via `token_counter`) |
 
 ## In the web UI
 
