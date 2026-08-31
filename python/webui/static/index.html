@@ -6,6 +6,7 @@
   <title>Graph DB Engine — Management Console</title>
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <script src="https://unpkg.com/3d-force-graph"></script>
 </head>
 <body>
   <div id="toast" class="toast"></div>
@@ -52,11 +53,16 @@
           <div class="panel-head">
             <h2>Graph Visualization</h2>
             <div class="panel-actions">
+              <div class="graph-mode-btns">
+                <button class="graph-mode-btn active" id="btn-2d">2D</button>
+                <button class="graph-mode-btn" id="btn-3d">3D</button>
+              </div>
               <select id="graph-label-filter"><option value="">All labels</option></select>
               <button id="btn-refresh-graph" class="mini">Refresh</button>
             </div>
           </div>
           <div id="graph"></div>
+          <div id="graph-3d"></div>
           <div class="legend" id="legend"></div>
         </div>
         <div class="panel side-panel">
