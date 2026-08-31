@@ -449,6 +449,125 @@ class DatasetBuilder:
             for n in self.store.nodes_by_label(DOCUMENT)
         ]
 
+    # ------------------------------------------------------- needle dataset
+    def build_needle_dataset(
+        self,
+        tools: List[Dict[str, Any]],
+        k: int = 500,
+        off_topic_ratio: float = 0.125,
+        source_paths: Optional[List[str]] = None,
+        system: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Generate Needle2 fine-tuning examples from ingested chunks.
+
+        Each example maps a natural-language query to the expected tool call.
+        Off-topic examples (``"answers": []``) are interleaved at
+        ``off_topic_ratio`` (Needle requires ~1-in-8 to avoid the model calling
+        a tool on everything).
+
+        Parameters
+        ----------
+        tools:
+            List of Needle-compatible JSON schema dicts (``name``, ``description``,
+            ``parameters``).  Embedded verbatim in every training example.
+        k:
+            Maximum number of positive (non-off-topic) examples.
+        off_topic_ratio:
+            Fraction of total examples that are off-topic (``answers: []``).
+            Default 0.125 ≈ 1-in-8.
+        source_paths:
+            Restrict to chunks from these source files (optional).
+        system:
+            Optional system string injected into every example as the ``system``
+            field, matching ``Needle(system=...)`` at inference.
+
+        Returns
+        -------
+        List[dict] ready to serialise as Needle JSONL.
+        """
+        if k <= 0:
+            return []
+        entries = self._gather_entries(source_paths, None, k)
+
+        # Default to first tool's name for the search call when tools are provided.
+        primary_tool = tools[0]["name"] if tools else "search_knowledge_base"
+
+        examples: List[Dict[str, Any]] = []
+
+        # Off-topic query pool — generic questions no declared tool can answer.
+        _OFF_TOPIC_QUERIES = [
+            "What is the current weather in London?",
+            "Who won the FIFA World Cup in 2022?",
+            "Convert 100 USD to EUR at today's rate.",
+            "Write me a haiku about autumn.",
+            "What is the speed of light?",
+            "How many calories are in an apple?",
+            "Translate 'hello' into Japanese.",
+            "What is the capital of Australia?",
+            "Summarise the news from today.",
+            "Who wrote Pride and Prejudice?",
+            "What is 17 times 23?",
+            "What are the best hiking trails near Denver?",
+            "Give me a recipe for banana bread.",
+            "What is the boiling point of water at altitude?",
+            "List the planets in our solar system.",
+            "How do I tie a Windsor knot?",
+        ]
+
+        for i, entry in enumerate(entries):
+            # Build the positive example — maps the QA question to the search tool.
+            q = entry.question or f"What does the document say about {entry.text[:40]}?"
+
+            # Determine the best arguments for the primary tool from the query.
+            # Strip "What does the document say about " prefix for the search arg.
+            search_query = re.sub(
+                r"^(?:What does the document say about |Tell me about |Explain )",
+                "",
+                q,
+                flags=re.I,
+            ).strip().rstrip("?").strip()
+
+            # Derive reasoning: quote key phrase from query and map to argument.
+            key_phrase = (
+                search_query[:60]
+                if len(search_query) <= 60
+                else search_query[:57] + "..."
+            )
+            reasoning = f"'{key_phrase}' -> query; default k=5"
+
+            example: Dict[str, Any] = {
+                "query": q,
+                "tools": tools,
+                "answers": [
+                    {
+                        "name": primary_tool,
+                        "arguments": {"query": search_query, "k": 5},
+                    }
+                ],
+                "reasoning": reasoning,
+            }
+            if system:
+                example["system"] = system
+            examples.append(example)
+
+            # Interleave off-topic examples at the requested ratio.
+            off_topic_every = (
+                max(1, round(1.0 / off_topic_ratio)) if off_topic_ratio > 0 else 0
+            )
+            if off_topic_every and (i + 1) % off_topic_every == 0:
+                ot_query = _OFF_TOPIC_QUERIES[i % len(_OFF_TOPIC_QUERIES)]
+                ot: Dict[str, Any] = {
+                    "query": ot_query,
+                    "tools": tools,
+                    "answers": [],
+                    "reasoning": "query is not answerable by any declared tool",
+                }
+                if system:
+                    ot["system"] = system
+                examples.append(ot)
+
+        return examples
+
     # --------------------------------------------------------------- private
     def _gather_entries(
         self,

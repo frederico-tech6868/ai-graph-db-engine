@@ -25,10 +25,16 @@
    - [Output Formats](#output-formats)
    - [Ollama Q&A Generator](#ollama-qa-generator)
    - [Export](#export)
-7. [Usage Patterns](#usage-patterns)
-8. [Examples](#examples)
-9. [Best Practices](#best-practices)
-10. [Troubleshooting](#troubleshooting)
+7. [Needle2 Integration](#needle2-integration)
+   - [NeedleAgentGroup](#needleagentgroup)
+   - [Training Workflow](#training-workflow)
+   - [NeedleOrchestrator](#needleorchestrator)
+   - [build_needle_dataset()](#build_needle_dataset)
+   - [GRAPHDB_TOOL_SCHEMAS](#graphdb_tool_schemas)
+8. [Usage Patterns](#usage-patterns)
+9. [Examples](#examples)
+10. [Best Practices](#best-practices)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1439,6 +1445,202 @@ See `examples/example_training_dataset.py` for a complete end-to-end walkthrough
 
 ---
 
+## Needle2 Integration
+
+**Needle2** (pip: [`cactus-needle`](https://pypi.org/project/cactus-needle/)) is a compact **embedded function-calling model** — not a chat LLM. Every response is a structured JSON tool call (or `[]` for off-topic queries). It is fine-tuned via LoRA adapters on JSONL data and exported to a `.cact` archive.
+
+This engine integrates Needle2 as a **trainable query layer** over the graph knowledge base:
+
+- Each **knowledge group** owns its own graph partition, ingests its own documents, and trains its own Needle adapter.
+- Needle's tools call **directly back into the graph** (`search_knowledge_base`, `list_documents`, `get_document_chunks`).
+- An **orchestrator** routes each query to the most relevant group.
+
+> The ingest / export / routing / stats surface works **without** `cactus-needle` installed. Only live inference (`group.agent`, `group.run()`) requires it.
+
+### Installation
+
+```bash
+pip install cactus-needle                  # inference only
+pip install 'cactus-needle[train]'         # + fine-tuning (CPU/JAX)
+pip install 'cactus-needle[train,gpu]'     # NVIDIA GPU training
+pip install 'cactus-needle[train,metal]'   # Apple Silicon
+```
+
+### Grouped knowledge bases
+
+```
+                    ┌────────────────────────┐
+   query  ─────────►│   NeedleOrchestrator   │
+                    │  (embeds & routes)     │
+                    └───────┬─────────┬──────┘
+                            │         │
+              ┌─────────────▼──┐   ┌──▼──────────────┐
+              │ NeedleAgentGroup│  │ NeedleAgentGroup │
+              │   "tech_docs"   │  │  "research_docs" │
+              │  ┌───────────┐  │  │  ┌───────────┐   │
+              │  │ GraphStore│  │  │  │ GraphStore│   │
+              │  │  + Needle │  │  │  │  + Needle │   │
+              │  └───────────┘  │  │  └───────────┘   │
+              └─────────────────┘  └──────────────────┘
+```
+
+---
+
+### NeedleAgentGroup
+
+`ai_memory.needle_agent.NeedleAgentGroup`
+
+A named, trainable knowledge group backed by the graph and Needle2.
+
+**Constructor**
+
+```python
+NeedleAgentGroup(
+    name: str,                       # logical group name, e.g. "legal"
+    store: GraphStore = None,        # defaults to a fresh in-memory store
+    embedder: Embedder = None,       # defaults to LocalEmbedder
+    loader: DocumentLoader = None,   # defaults to DocumentLoader()
+    system: str = None,             # system string (default "knowledge_group: <name>")
+    weights: str = None,            # optional path to a .cact archive
+    tool_schemas: List[dict] = None, # override GRAPHDB_TOOL_SCHEMAS (max 5)
+)
+```
+
+**Methods**
+
+```python
+group.ingest(paths: List[str])                 # → IngestResult
+group.export_training_data(path, k=500, off_topic_ratio=0.125)  # → written path
+group.load_weights(weights_path: str)          # load a .cact archive (invalidates agent cache)
+group.agent                                    # → needle.Needle (lazy; raises ImportError if not installed)
+group.run(query, max_steps=8)                  # → Needle response dict
+group.complete(text)                           # → single-turn Needle response
+group.reset()                                  # rewind conversation history
+group.stats()                                  # → {documents, chunks, group_name, weights, tool_count, ...}
+```
+
+---
+
+### Training Workflow
+
+```python
+from ai_memory.needle_agent import NeedleAgentGroup
+
+# 1 — Ingest documents into the group's graph
+group = NeedleAgentGroup("legal", system="knowledge_group: legal")
+group.ingest(["contract.pdf", "policy.docx"])
+
+# 2 — Export Needle fine-tuning JSONL (positive + off-topic examples)
+group.export_training_data("legal_train.jsonl", k=500)
+```
+
+```bash
+# 3 — Fine-tune Needle outside Python
+needle finetune legal_train.jsonl --epochs 20 --out legal_adapter.pkl
+needle build checkpoints/needle2.pkl --lora legal_adapter.pkl --out legal.cact
+```
+
+```python
+# 4 — Load the trained weights and query
+group.load_weights("legal.cact")
+result = group.run("What are the termination clauses?")
+print(result["function_calls"])
+```
+
+---
+
+### NeedleOrchestrator
+
+`ai_memory.needle_agent.NeedleOrchestrator`
+
+Routes queries across multiple `NeedleAgentGroup` instances by embedding the query and comparing it to each group's name/system string.
+
+**Constructor**
+
+```python
+NeedleOrchestrator(
+    groups: List[NeedleAgentGroup] = None,
+    embedder: Embedder = None,       # defaults to LocalEmbedder
+)
+```
+
+**Methods**
+
+```python
+orch.add_group(group)                          # register a group
+orch.route(query) -> NeedleAgentGroup          # pick the best group (None if empty)
+orch.run(query, max_steps=8)                   # route + run; adds "routed_to" to the result
+orch.export_all_training_data(out_dir, k=500)  # → {group_name: path}
+orch.stats()                                   # → {group_name: stats}
+```
+
+```python
+from ai_memory.needle_agent import NeedleOrchestrator
+
+orch = NeedleOrchestrator(groups=[tech_group, research_group])
+orch.export_all_training_data("./training")     # tech_docs_train.jsonl, ...
+
+result = orch.run("How does vector search work?")
+print(result["routed_to"])  # "tech_docs"
+```
+
+---
+
+### build_needle_dataset()
+
+`DatasetBuilder.build_needle_dataset(tools, k=500, off_topic_ratio=0.125, source_paths=None, system=None)`
+
+Generates the Needle2 JSONL examples directly (used internally by `export_training_data`). Each example maps a natural-language query to the expected tool call:
+
+```json
+{
+  "query": "What does the document say about Vector Search?",
+  "tools": [ /* full JSON schema list, embedded verbatim */ ],
+  "answers": [
+    {"name": "search_knowledge_base", "arguments": {"query": "Vector Search", "k": 5}}
+  ],
+  "reasoning": "'Vector Search' -> query; default k=5",
+  "system": "knowledge_group: tech"
+}
+```
+
+Off-topic examples (interleaved at `off_topic_ratio` ≈ 1-in-8) carry an empty `answers` list so the model learns **not** to call a tool on unrelated queries:
+
+```json
+{
+  "query": "What is the current weather in London?",
+  "tools": [ /* ... */ ],
+  "answers": [],
+  "reasoning": "query is not answerable by any declared tool"
+}
+```
+
+| Parameter | Meaning |
+|-----------|---------|
+| `tools` | List of Needle-compatible JSON schema dicts, embedded in every example |
+| `k` | Max positive (non-off-topic) examples |
+| `off_topic_ratio` | Fraction of off-topic examples (default 0.125 ≈ 1-in-8). `0.0` disables them |
+| `source_paths` | Restrict to chunks from these files |
+| `system` | Optional system string injected into every example |
+
+---
+
+### GRAPHDB_TOOL_SCHEMAS
+
+`ai_memory.needle_agent.GRAPHDB_TOOL_SCHEMAS` — three built-in, Needle-compatible tool schemas backed by the graph:
+
+| Tool | Purpose |
+|------|---------|
+| `search_knowledge_base` | Vector search for top-k relevant chunks (`query`, `k`, `doc_type`) |
+| `list_documents` | List all ingested documents with metadata |
+| `get_document_chunks` | Retrieve all chunks from one document by `source_path` |
+
+Needle allows **max 5 tools** in context per query — these three leave room for custom additions via the `tool_schemas` parameter.
+
+See `examples/example_needle_agent.py` for a complete end-to-end walkthrough (works without `cactus-needle` installed).
+
+---
+
 ## Summary
 
 You now have everything you need to integrate the **AI-GraphDB-Engine** into your LLM or agent system:
@@ -1451,6 +1653,7 @@ You now have everything you need to integrate the **AI-GraphDB-Engine** into you
 6. **Expose tools** — MCP servers for tool-calling LLMs
 7. **Persist** — `store.save(path)`
 8. **Train** — `DatasetBuilder` to turn local docs into fine-tuning datasets
+9. **Needle2** — `NeedleAgentGroup` + `NeedleOrchestrator` for trainable embedded function-calling agents
 
 The graph holds **everything**; retrieval surfaces **only what's relevant**. Your LLM never overflows, and nothing is lost.
 

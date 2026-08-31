@@ -13,3 +13,8 @@ pydantic>=2.0
 #   pip install pandas openpyxl
 # Parquet export:
 #   pip install pandas pyarrow
+# Needle2 embedded agent (cactus-needle):
+#   pip install cactus-needle
+#   pip install 'cactus-needle[train]'       # fine-tuning (CPU/JAX)
+#   pip install 'cactus-needle[train,gpu]'   # NVIDIA GPU training
+#   pip install 'cactus-needle[train,metal]' # Apple Silicon

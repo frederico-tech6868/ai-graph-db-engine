@@ -24,6 +24,11 @@ from .prompts import (
     REFLECTION_PROMPT,
     SYSTEM_PROMPT_WITH_MEMORY,
 )
+from .needle_agent import (
+    GRAPHDB_TOOL_SCHEMAS,
+    NeedleAgentGroup,
+    NeedleOrchestrator,
+)
 from .recall import RecallEngine, RecalledMemory
 from .schema import (
     AGENT,
@@ -57,6 +62,10 @@ __all__ = [
     "RecalledMemory",
     # agent
     "GraphAgent",
+    # needle
+    "GRAPHDB_TOOL_SCHEMAS",
+    "NeedleAgentGroup",
+    "NeedleOrchestrator",
     # tools
     "MEMORY_TOOLS",
     "MemoryToolExecutor",
