@@ -19,10 +19,16 @@
    - [A2A Protocol](#a2a-protocol)
    - [Orchestrator](#orchestrator)
    - [ContextManager](#contextmanager)
-6. [Usage Patterns](#usage-patterns)
-7. [Examples](#examples)
-8. [Best Practices](#best-practices)
-9. [Troubleshooting](#troubleshooting)
+6. [Training Dataset Pipeline](#training-dataset-pipeline)
+   - [DocumentLoader](#documentloader)
+   - [DatasetBuilder](#datasetbuilder)
+   - [Output Formats](#output-formats)
+   - [Ollama Q&A Generator](#ollama-qa-generator)
+   - [Export](#export)
+7. [Usage Patterns](#usage-patterns)
+8. [Examples](#examples)
+9. [Best Practices](#best-practices)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1136,6 +1142,303 @@ memory = AgentMemory("agent", store, embedder=OllamaEmbedder())
 
 ---
 
+## Training Dataset Pipeline
+
+The `ai_memory` package ships a complete **document-to-training-data** pipeline that turns local files into fine-tuning datasets for any LLM.
+
+### Pipeline overview
+
+```
+Local files (PDF / DOCX / TXT / MD / CSV / XLSX)
+        │
+        ▼  DocumentLoader
+   List[Chunk]  ──────────────────────────────────────────►  graph
+        │                                                     │
+        │  DatasetBuilder.ingest()                            │ CHUNK nodes
+        │                                                     │ DOCUMENT nodes
+        │                                                     │ CHUNK_OF / NEXT_CHUNK edges
+        ▼  DatasetBuilder.build_dataset(format=...)           │
+  List[dict] training examples  ◄──────────────── retrieve   │
+        │
+        ▼  DatasetBuilder.export()
+   JSONL / CSV / Parquet file
+```
+
+### Quick start
+
+```python
+from ai_memory.dataset_builder import DatasetBuilder
+from ai_memory.embedder import LocalEmbedder
+from graphdb.store import GraphStore
+
+store = GraphStore(path="my_docs.json")       # persist to disk (optional)
+builder = DatasetBuilder(store=store, embedder=LocalEmbedder())
+
+# 1 — Ingest documents
+result = builder.ingest([
+    "paper.pdf",
+    "notes.md",
+    "data.csv",
+    "sheet.xlsx",
+])
+print(result)  # IngestResult(docs=3, chunks=42, skipped=0)
+
+# 2 — Build a dataset  (vector-search scoped if query given)
+dataset = builder.build_dataset(format="alpaca", k=500)
+
+# 3 — Export
+builder.export(dataset, "train.jsonl", file_format="jsonl")
+```
+
+---
+
+### DocumentLoader
+
+`ai_memory.document_loader.DocumentLoader`
+
+Parses a local file into a list of `Chunk` objects. Format is inferred from the file extension.
+
+**Supported formats**
+
+| Extension | Library required |
+|-----------|-----------------|
+| `.txt`, `.md`, `.markdown` | built-in |
+| `.csv` | built-in `csv` |
+| `.pdf` | `pip install pypdf` |
+| `.docx`, `.doc` | `pip install python-docx` |
+| `.xlsx`, `.xls` | `pip install pandas openpyxl` |
+
+**Constructor**
+
+```python
+DocumentLoader(
+    chunk_size: int = 800,      # max chars per chunk
+    chunk_overlap: int = 100,   # overlap between adjacent chunks
+    min_chunk_len: int = 60,    # discard chunks shorter than this (text only)
+)
+```
+
+> **Note:** `min_chunk_len` is bypassed for CSV rows — every non-empty row
+> is always a valid chunk regardless of its character count.
+
+**Methods**
+
+```python
+loader.load(path: str) -> List[Chunk]
+```
+
+Returns a list of `Chunk` dataclass instances:
+
+```python
+@dataclass
+class Chunk:
+    text: str
+    chunk_index: int
+    source_path: str
+    doc_type: str          # "pdf" | "docx" | "txt" | "md" | "csv" | "excel"
+    page: Optional[int]    # PDF only (1-based)
+    section: Optional[str] # DOCX heading / Excel sheet name
+    row: Optional[int]     # CSV / Excel row number
+    metadata: dict
+```
+
+**Chunking strategy**
+
+Text is split on double-newlines (paragraph boundaries). Paragraphs are merged up to `chunk_size`, then split with a `chunk_overlap`-character sliding window for large paragraphs. Paragraphs shorter than `min_chunk_len` are discarded as noise (except CSV rows — see above).
+
+---
+
+### DatasetBuilder
+
+`ai_memory.dataset_builder.DatasetBuilder`
+
+Orchestrates ingest → graph storage → dataset generation → export.
+
+**Constructor**
+
+```python
+DatasetBuilder(
+    store: GraphStore = None,                   # defaults to a fresh in-memory store
+    embedder: Embedder = LocalEmbedder(),        # text-to-vector
+    loader: DocumentLoader = DocumentLoader(),   # file parser
+    qa_generator: Callable[[str], str] = None,  # question generator (offline heuristic by default)
+    system_prompt: str = "...",                  # system message for openai format
+)
+```
+
+**Graph schema created by ingest**
+
+| Node label | Key properties |
+|-----------|----------------|
+| `Document` | `source_path`, `filename`, `doc_type`, `num_chunks`, `ingested_at` |
+| `Chunk` | `text`, `chunk_index`, `source_path`, `doc_type`, `page`, `section`, `row` |
+
+| Edge label | Meaning |
+|-----------|---------|
+| `CHUNK_OF` | `Chunk` → `Document` |
+| `NEXT_CHUNK` | `Chunk` → next `Chunk` in the same document |
+
+**`ingest(paths)`**
+
+```python
+result: IngestResult = builder.ingest(["doc.pdf", "notes.md"])
+# result.documents   — new documents added
+# result.chunks_stored  — total chunk nodes created
+# result.chunks_skipped — chunks skipped (duplicate document)
+# result.files       — list of ingested file paths
+# result.errors      — dict {path: error_message} for failed files
+```
+
+Already-ingested documents (same absolute path) are **skipped** automatically. Delete the `Document` node if you want to re-ingest.
+
+**`build_dataset(format, source_paths, query, k, system_prompt)`**
+
+```python
+dataset: List[dict] = builder.build_dataset(
+    format="alpaca",               # see Output Formats section
+    source_paths=["doc.pdf"],      # optional: restrict to specific files
+    query="vector similarity",     # optional: retrieve by semantic similarity
+    k=500,                         # max training examples
+)
+```
+
+**`stats()`**
+
+```python
+st = builder.stats()
+# {"documents": 3, "chunks": 42, "chunks_by_type": {"txt": 15, "csv": 3}, ...}
+```
+
+**`list_documents()`**
+
+```python
+docs = builder.list_documents()
+# [{"filename": "paper.pdf", "source_path": "...", "doc_type": "pdf", "num_chunks": 12, ...}]
+```
+
+---
+
+### Output Formats
+
+Five training-data formats are supported:
+
+#### `"raw"` — plain chunk text
+```json
+{
+  "text": "Graph databases store data as nodes and edges.",
+  "source": "/abs/path/notes.txt",
+  "chunk_index": 0,
+  "page": null,
+  "section": null,
+  "doc_type": "txt"
+}
+```
+
+#### `"completion"` — prompt / completion pair (classic fine-tuning)
+```json
+{
+  "prompt": "Based on the following document excerpt, continue or summarise...\n\n<chunk text>",
+  "completion": "<chunk text>"
+}
+```
+
+#### `"qa"` — question / answer / context triple
+```json
+{
+  "question": "What does the document say about Graph databases?",
+  "answer": "Graph databases store data as nodes and edges.",
+  "context": "Graph databases store data as nodes and edges.",
+  "source": "/abs/path/notes.txt",
+  "page": null,
+  "section": null
+}
+```
+
+#### `"alpaca"` — Alpaca / LLaMA instruction format
+```json
+{
+  "instruction": "What does the document say about Graph databases?",
+  "input": "Graph databases store data as nodes and edges.",
+  "output": "Graph databases store data as nodes and edges."
+}
+```
+
+#### `"openai"` — OpenAI chat fine-tuning format
+```json
+{
+  "messages": [
+    {"role": "system",    "content": "You are a knowledgeable assistant..."},
+    {"role": "user",      "content": "What does the document say about Graph databases?"},
+    {"role": "assistant", "content": "Graph databases store data as nodes and edges."}
+  ]
+}
+```
+
+---
+
+### Ollama Q&A Generator
+
+By default, questions are generated with a **fast offline heuristic** (no model needed). To generate higher-quality, natural-language questions using a local Ollama model, pass `ollama_qa_generator()`:
+
+```python
+from ai_memory.dataset_builder import DatasetBuilder, ollama_qa_generator
+
+builder = DatasetBuilder(
+    store=store,
+    embedder=embedder,
+    qa_generator=ollama_qa_generator(
+        model="llama3.2:3b",          # any Ollama model
+        host="http://localhost:11434",
+    ),
+)
+```
+
+You can also pass any `Callable[[str], str]` as `qa_generator` for a custom generator:
+
+```python
+def my_generator(text: str) -> str:
+    return f"Can you explain: {text[:80]}?"
+
+builder.qa_generator = my_generator
+```
+
+---
+
+### Export
+
+```python
+builder.export(
+    dataset: List[dict],     # output of build_dataset()
+    output_path: str,        # file path to write
+    file_format: str,        # "jsonl" (default) | "csv" | "parquet"
+)
+```
+
+| Format | Notes |
+|--------|-------|
+| `jsonl` | One JSON object per line — works directly with OpenAI fine-tuning and HuggingFace `datasets.load_dataset("json", ...)` |
+| `csv` | Flat CSV — nested structures (e.g. `messages` list in openai format) are JSON-serialised into the cell |
+| `parquet` | Requires `pip install pandas pyarrow` |
+
+**Full example — alpaca JSONL**
+
+```python
+from ai_memory.dataset_builder import DatasetBuilder
+from ai_memory.embedder import LocalEmbedder
+from graphdb.store import GraphStore
+
+builder = DatasetBuilder(store=GraphStore(), embedder=LocalEmbedder())
+builder.ingest(["paper.pdf", "notes.md", "faq.csv"])
+
+dataset = builder.build_dataset(format="alpaca", k=1000)
+path = builder.export(dataset, "alpaca_train.jsonl")
+print(f"Wrote {len(dataset)} examples to {path}")
+```
+
+See `examples/example_training_dataset.py` for a complete end-to-end walkthrough including all 5 formats and query-scoped retrieval.
+
+---
+
 ## Summary
 
 You now have everything you need to integrate the **AI-GraphDB-Engine** into your LLM or agent system:
@@ -1147,6 +1450,7 @@ You now have everything you need to integrate the **AI-GraphDB-Engine** into you
 5. **Collaborate** — `Orchestrator` + A2A for multi-agent systems
 6. **Expose tools** — MCP servers for tool-calling LLMs
 7. **Persist** — `store.save(path)`
+8. **Train** — `DatasetBuilder` to turn local docs into fine-tuning datasets
 
 The graph holds **everything**; retrieval surfaces **only what's relevant**. Your LLM never overflows, and nothing is lost.
 

@@ -3,3 +3,13 @@ pytest>=7.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.0
+
+# --- Training Dataset Pipeline (optional, install as needed) ---
+# PDF support:
+#   pip install pypdf
+# DOCX / Word support:
+#   pip install python-docx
+# CSV/Excel (pandas + openpyxl required for .xlsx/.xls):
+#   pip install pandas openpyxl
+# Parquet export:
+#   pip install pandas pyarrow
