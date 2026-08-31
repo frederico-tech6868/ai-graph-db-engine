@@ -135,7 +135,7 @@ document.getElementById('btn-2d').addEventListener('click', () => {
   graphMode = '2d';
   document.getElementById('btn-2d').classList.add('active');
   document.getElementById('btn-3d').classList.remove('active');
-  document.getElementById('graph').style.display = '';
+  document.getElementById('graph').style.display = 'block';
   document.getElementById('graph-3d').style.display = 'none';
   if (graph3D) { graph3D._destructor(); graph3D = null; }
   renderGraph();
@@ -147,7 +147,7 @@ document.getElementById('btn-3d').addEventListener('click', () => {
   document.getElementById('btn-3d').classList.add('active');
   document.getElementById('btn-2d').classList.remove('active');
   document.getElementById('graph').style.display = 'none';
-  document.getElementById('graph-3d').style.display = '';
+  document.getElementById('graph-3d').style.display = 'block';
   render3DGraph();
 });
 
