@@ -3,3 +3,18 @@ pytest>=7.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.0
+
+# --- Training Dataset Pipeline (optional, install as needed) ---
+# PDF support:
+#   pip install pypdf
+# DOCX / Word support:
+#   pip install python-docx
+# CSV/Excel (pandas + openpyxl required for .xlsx/.xls):
+#   pip install pandas openpyxl
+# Parquet export:
+#   pip install pandas pyarrow
+# Needle2 embedded agent (cactus-needle):
+#   pip install cactus-needle
+#   pip install 'cactus-needle[train]'       # fine-tuning (CPU/JAX)
+#   pip install 'cactus-needle[train,gpu]'   # NVIDIA GPU training
+#   pip install 'cactus-needle[train,metal]' # Apple Silicon
