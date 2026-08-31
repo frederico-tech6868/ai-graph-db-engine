@@ -88,25 +88,86 @@ This engine solves it by acting as **external long-term memory**: the graph hold
 
 ### Prerequisites
 
-- Python 3.8+
-- Optional: [Ollama](https://ollama.com) for local models
+- Python 3.10+
+- [`uv`](https://docs.astral.sh/uv/) — recommended (fast, reproducible venvs)
+- Optional: [Ollama](https://ollama.com) for local embedding / LLM models
 
-### Install
+### Recommended — `uv` venv
+
+[`uv`](https://docs.astral.sh/uv/) is a drop-in replacement for `pip` /
+`venv` that is 10–100× faster and produces fully reproducible environments.
 
 ```bash
-# Clone the repository
+# 1. Install uv (once, system-wide)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# or:  pip install uv
+
+# 2. Clone the repository
 git clone https://github.com/frederico-tech6868/ai-graph-db-engine.git
 cd ai-graph-db-engine/python
 
-# Install in editable mode
-pip install -e .
+# 3. Create an isolated virtual environment
+uv venv .venv
 
-# Optional: install the faster Rust backend
-cd ../rust
-./build.sh   # requires Rust toolchain; falls back to Python if not built
+# 4. Activate the environment
+source .venv/bin/activate         # Linux / macOS
+# .venv\Scripts\activate          # Windows PowerShell
+
+# 5. Install dependencies
+uv pip install -e .               # core engine — pure Python
+uv pip install -r requirements.txt    # fastapi, uvicorn, pydantic, numpy, pytest
 ```
 
-### Verify
+> **Optional extras**
+>
+> ```bash
+> uv pip install -e ".[fast]"     # numpy acceleration for vector ops
+> uv pip install -e ".[test]"     # pytest test suite
+> ```
+>
+> **Optional document-loader backends** (install only what you need):
+>
+> ```bash
+> uv pip install pypdf             # PDF support
+> uv pip install python-docx       # Word / DOCX support
+> uv pip install pandas openpyxl   # CSV, Excel (.xlsx)
+> uv pip install pandas pyarrow    # Parquet export
+> ```
+>
+> **Needle2 embedded agent** (optional fine-tuning pipeline):
+>
+> ```bash
+> uv pip install cactus-needle                   # inference only
+> uv pip install 'cactus-needle[train]'          # + fine-tuning (CPU / JAX)
+> uv pip install 'cactus-needle[train,gpu]'      # NVIDIA GPU training
+> uv pip install 'cactus-needle[train,metal]'    # Apple Silicon
+> ```
+
+### Alternative — plain `pip`
+
+```bash
+python -m venv .venv
+source .venv/bin/activate         # Linux / macOS
+pip install -e .
+pip install -r requirements.txt
+```
+
+### Run the web UI
+
+```bash
+python -m webui.run               # → http://localhost:3000
+```
+
+Open <http://localhost:3000> and click **Seed demo** to populate example data.
+The graph is persisted to `webui_graph.json` (override via `GRAPHDB_WEB_PATH`).
+
+### Run the tests
+
+```bash
+python -m pytest tests/ -v        # 156 tests, all should pass
+```
+
+### Verify the install
 
 ```python
 from graphdb.store import GraphStore
