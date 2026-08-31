@@ -57,6 +57,8 @@ $$(".nav-btn").forEach((btn) =>
 
 // ---------------------------------------------------------------- dashboard
 let network = null;
+let graph3D = null;
+let graphMode = '2d'; // '2d' | '3d'
 async function loadDashboard() {
   const stats = await api("/api/stats");
   $("#stat-nodes").textContent = stats.node_count;
@@ -64,7 +66,8 @@ async function loadDashboard() {
   $("#stat-labels").textContent = stats.labels.length;
   $("#stat-memories").textContent = stats.memory.total_memories || 0;
   await refreshLabelSelects(stats.labels.map((l) => l.label));
-  await renderGraph();
+  if (graphMode === '3d') await render3DGraph();
+  else await renderGraph();
 }
 
 async function renderGraph() {
@@ -119,8 +122,82 @@ async function showNodeDetail(id) {
     <button class="mini danger" style="margin-top:12px" onclick="deleteNode('${n.id}')">Delete node</button>`;
 }
 
-$("#btn-refresh-graph").addEventListener("click", renderGraph);
-$("#graph-label-filter").addEventListener("change", renderGraph);
+function refreshActiveGraph() {
+  if (graphMode === '3d') render3DGraph();
+  else renderGraph();
+}
+$("#btn-refresh-graph").addEventListener("click", refreshActiveGraph);
+$("#graph-label-filter").addEventListener("change", refreshActiveGraph);
+
+// ---------------------------------------------------------------- 2D / 3D toggle
+document.getElementById('btn-2d').addEventListener('click', () => {
+  if (graphMode === '2d') return;
+  graphMode = '2d';
+  document.getElementById('btn-2d').classList.add('active');
+  document.getElementById('btn-3d').classList.remove('active');
+  document.getElementById('graph').style.display = '';
+  document.getElementById('graph-3d').style.display = 'none';
+  if (graph3D) { graph3D._destructor(); graph3D = null; }
+  renderGraph();
+});
+
+document.getElementById('btn-3d').addEventListener('click', () => {
+  if (graphMode === '3d') return;
+  graphMode = '3d';
+  document.getElementById('btn-3d').classList.add('active');
+  document.getElementById('btn-2d').classList.remove('active');
+  document.getElementById('graph').style.display = 'none';
+  document.getElementById('graph-3d').style.display = '';
+  render3DGraph();
+});
+
+// ---------------------------------------------------------------- 3D graph
+async function render3DGraph() {
+  const label = $('#graph-label-filter').value;
+  const data = await api('/api/graph' + (label ? `?label=${encodeURIComponent(label)}` : ''));
+
+  const gData = {
+    nodes: data.nodes.map(n => ({
+      id: n.id,
+      name: (n.properties.name || n.properties.text || n.label) + '',
+      label: n.label,
+      color: colorFor(n.label),
+      _raw: n,
+    })),
+    links: data.edges.map(e => ({
+      source: e.src_id,
+      target: e.dst_id,
+      label: e.label,
+    })),
+  };
+
+  const container = document.getElementById('graph-3d');
+  container.innerHTML = '';
+  if (graph3D) { graph3D._destructor(); graph3D = null; }
+
+  graph3D = ForceGraph3D()(container)
+    .backgroundColor('#1d2430')
+    .nodeColor(n => n.color)
+    .nodeLabel(n =>
+      `<span style="color:#e6edf3;font-family:system-ui;font-size:12px;` +
+      `background:rgba(29,36,48,.88);padding:2px 8px;border-radius:5px">` +
+      `${n.label}: ${n.name}</span>`)
+    .nodeResolution(16)
+    .nodeRelSize(5)
+    .linkColor(() => '#3a4657')
+    .linkWidth(1.5)
+    .linkDirectionalArrowLength(4)
+    .linkDirectionalArrowRelPos(1)
+    .linkLabel(l => l.label || '')
+    .graphData(gData)
+    .onNodeClick(node => showNodeDetail(node.id));
+
+  // update legend
+  const labels = [...new Set(data.nodes.map(n => n.label))];
+  document.getElementById('legend').innerHTML = labels
+    .map(l => `<span><i style="background:${colorFor(l)}"></i>${l}</span>`)
+    .join('');
+}
 
 // ---------------------------------------------------------------- labels
 async function refreshLabelSelects(labels) {

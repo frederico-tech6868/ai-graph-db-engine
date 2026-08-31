@@ -48,9 +48,16 @@ h2{margin:0;font-size:15px}
 
 /* Graph */
 #graph{height:460px;background:var(--panel2);border-radius:10px;border:1px solid var(--border)}
+#graph-3d{height:460px;background:var(--panel2);border-radius:10px;border:1px solid var(--border);display:none;overflow:hidden}
 .legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-size:12px;color:var(--muted)}
 .legend span{display:inline-flex;align-items:center;gap:5px}
 .legend i{width:11px;height:11px;border-radius:50%;display:inline-block}
+
+/* 2D / 3D mode toggle */
+.graph-mode-btns{display:flex;border:1px solid var(--border);border-radius:7px;overflow:hidden;margin-right:4px}
+.graph-mode-btn{background:var(--panel2);border:none;color:var(--muted);padding:5px 13px;font-size:12px;font-family:inherit;cursor:pointer;transition:.15s}
+.graph-mode-btn:hover{color:var(--text)}
+.graph-mode-btn.active{background:var(--accent);color:#fff;font-weight:600}
 
 /* Forms */
 .form{display:flex;flex-direction:column;gap:8px}
