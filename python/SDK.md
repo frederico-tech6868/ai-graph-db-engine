@@ -31,10 +31,16 @@
    - [NeedleOrchestrator](#needleorchestrator)
    - [build_needle_dataset()](#build_needle_dataset)
    - [GRAPHDB_TOOL_SCHEMAS](#graphdb_tool_schemas)
-8. [Usage Patterns](#usage-patterns)
-9. [Examples](#examples)
-10. [Best Practices](#best-practices)
-11. [Troubleshooting](#troubleshooting)
+8. [JEPA-GraphRAG](#jepa-graphrag)
+   - [Overview](#jepa-graphrag-overview)
+   - [Community Detection](#community-detection)
+   - [GraphRAG Retrieval](#graphrag-retrieval)
+   - [Graph-JEPA World Model](#graph-jepa-world-model)
+   - [Hybrid Search](#hybrid-search)
+9. [Usage Patterns](#usage-patterns)
+10. [Examples](#examples)
+11. [Best Practices](#best-practices)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -935,6 +941,392 @@ def my_summarizer(raw_text: str) -> str:
 
 ctx = ContextManager(memory, budget, summarizer=my_summarizer)
 ```
+
+---
+
+## JEPA-GraphRAG
+
+**Joint-Embedding Predictive Architecture + GraphRAG** for advanced retrieval over knowledge graphs.
+
+### Overview
+
+JEPA-GraphRAG combines two powerful paradigms:
+
+1. **GraphRAG** — Community detection (Louvain algorithm), local search (k-hop expansion), and global search (community-based retrieval)
+2. **Graph-JEPA** — A self-supervised world model that predicts latent graph states for energy-based retrieval
+
+**Key advantages:**
+- **Noise-resistant retrieval** — operates in abstract latent space, not raw text
+- **Multi-hop reasoning** — predicts hidden relationships before traversing the graph
+- **Pure Python** — works with `numpy` (optional `torch` acceleration)
+- **No external dependencies** — no Neo4j, fully integrated with `GraphStore`
+
+---
+
+### Community Detection
+
+The `CommunityDetector` implements the Louvain algorithm to identify densely-connected clusters (communities) in your graph.
+
+```python
+from graphdb import GraphStore
+from ai_memory.jepa_graphrag import CommunityDetector
+
+store = GraphStore()
+# ... add nodes and edges ...
+
+detector = CommunityDetector(store, resolution=1.0)
+communities = detector.detect_communities()  # {node_id: community_id}
+
+# Group nodes by community
+from collections import defaultdict
+comm_groups = defaultdict(list)
+for node in store.all_nodes():
+    comm_id = communities.get(node.id)
+    if comm_id is not None:
+        comm_groups[comm_id].append(node)
+
+print(f"Found {len(comm_groups)} communities")
+```
+
+**Parameters:**
+- `resolution` (float, default 1.0) — higher values → more granular communities
+
+---
+
+### GraphRAG Retrieval
+
+The `GraphRAGRetriever` provides Microsoft GraphRAG-style retrieval over `GraphStore`.
+
+#### Local Search (K-Hop Expansion)
+
+Finds seed nodes via vector search, then expands their k-hop neighborhood:
+
+```python
+from ai_memory.jepa_graphrag import GraphRAGRetriever
+from ai_memory.embedder import LocalEmbedder
+
+embedder = LocalEmbedder()
+retriever = GraphRAGRetriever(store, embedder)
+
+# Local search with 2-hop expansion
+results = retriever.local_search(
+    "machine learning engineer",
+    k=5,           # top-5 seed nodes
+    max_hops=2,    # expand 2 hops
+    label="Person" # optional label filter
+)
+
+for node, score in results:
+    print(f"{score:.3f} - {node.label}: {node.properties.get('name')}")
+```
+
+#### Global Search (Community-Based)
+
+Scores entire communities, returning top-k communities with their member nodes:
+
+```python
+# Global search across communities
+results = retriever.global_search(
+    "deep learning frameworks",
+    k=3,  # top-3 communities
+    label="Framework"  # optional
+)
+
+for comm_id, nodes, score in results:
+    print(f"Community {comm_id} (score: {score:.3f})")
+    for node in nodes[:5]:
+        print(f"  - {node.label}: {node.properties.get('name')}")
+```
+
+#### Community Summaries
+
+```python
+summary = retriever.get_community_summary(community_id=0)
+print(summary)
+# Output:
+# Community 0:
+#   12 nodes
+#   - 5 Person nodes
+#   - 4 Framework nodes
+#   - 3 Language nodes
+```
+
+---
+
+### Graph-JEPA World Model
+
+The core predictive component. Instead of directly matching text, JEPA:
+1. Encodes queries & subgraphs into a **latent space**
+2. **Predicts** the latent state of target structures
+3. Retrieves via **energy minimization** (L2 distance in latent space)
+
+#### Architecture
+
+```
+Context Encoder  →  Predictor  →  Predicted Latent State
+                                        ↓
+                                  L2 Distance
+                                        ↓
+Target Encoder  →  Target Latent State (EMA)
+```
+
+- **Context Encoder** — processes queries/prompt text
+- **Target Encoder** — processes graph substructures (updated via EMA)
+- **Predictor** — maps context → predicted target (operates purely in latent space)
+- **VICReg Loss** — prevents representation collapse (variance + covariance regularization)
+
+#### Initialization
+
+```python
+from ai_memory.jepa_graphrag import JEPAGraphRAG
+
+jepa = JEPAGraphRAG(
+    store=store,
+    embedder=embedder,
+    latent_dim=128,    # latent space dimension
+    use_torch=False    # False=numpy, True=PyTorch (if installed)
+)
+```
+
+#### Training
+
+Train the world model on query-target pairs:
+
+```python
+contexts = ["machine learning engineer", "systems programmer"]
+targets = ["PyTorch deep learning", "Rust safety memory"]
+
+loss_dict = jepa.train_step(
+    contexts,
+    targets,
+    learning_rate=0.001,
+    ema_alpha=0.99  # EMA momentum for target encoder
+)
+
+print(f"Loss: {loss_dict['total']:.4f}")
+print(f"  Similarity: {loss_dict['sim']:.4f}")
+print(f"  Variance: {loss_dict['var']:.4f}")
+print(f"  Covariance: {loss_dict['cov']:.4f}")
+```
+
+**Loss components:**
+- **Similarity** — MSE between predicted and target latent states
+- **Variance** — forces features to maintain variance (prevents collapse)
+- **Covariance** — decorrelates feature dimensions
+
+#### Latent Search
+
+Precompute community embeddings for fast retrieval:
+
+```python
+jepa.precompute_community_embeddings()
+```
+
+Search by **community** (fastest):
+
+```python
+results = jepa.latent_search(
+    "Python machine learning",
+    k=3,
+    mode='community'
+)
+
+for comm_id, distance in results:
+    print(f"Community {comm_id}: distance={distance:.4f}")
+```
+
+Search by **node** (more granular):
+
+```python
+results = jepa.latent_search(
+    "Python machine learning",
+    k=5,
+    mode='node'
+)
+
+for node, distance in results:
+    print(f"{node.label}: {node.properties.get('name')} (distance={distance:.4f})")
+```
+
+---
+
+### Hybrid Search
+
+Combine **all retrieval modes** for maximum coverage:
+
+```python
+results = jepa.hybrid_search(
+    "Python deep learning engineer",
+    k=3,
+    use_local=True,    # k-hop expansion
+    use_global=True,   # community retrieval
+    use_latent=True    # energy-based JEPA search
+)
+
+# Results dictionary:
+# {
+#   'local': [(node, score), ...],
+#   'global': [(comm_id, nodes, score), ...],
+#   'latent_community': [(comm_id, distance), ...],
+#   'latent_node': [(node, distance), ...]
+# }
+
+for node, score in results['local'][:3]:
+    print(f"Local: {score:.3f} - {node.properties.get('name')}")
+
+for comm_id, nodes, score in results['global'][:2]:
+    print(f"Global: Community {comm_id} (score: {score:.3f})")
+
+for comm_id, dist in results['latent_community'][:3]:
+    print(f"Latent: Community {comm_id} (distance: {dist:.4f})")
+```
+
+#### Selective Hybrid Search
+
+Disable specific modes:
+
+```python
+results = jepa.hybrid_search(
+    query,
+    k=5,
+    use_local=True,
+    use_global=False,   # skip community search
+    use_latent=False    # skip JEPA search
+)
+# Returns only: {'local': [...]}
+```
+
+---
+
+### Complete Example
+
+```python
+from graphdb import GraphStore, Node, Edge
+from ai_memory.embedder import LocalEmbedder
+from ai_memory.jepa_graphrag import JEPAGraphRAG
+
+# 1. Build graph
+store = GraphStore()
+embedder = LocalEmbedder()
+
+alice = store.add_node(Node(
+    label="Person",
+    properties={"name": "Alice", "role": "ML Engineer"},
+    embedding=embedder.embed("Alice is a machine learning engineer")
+))
+
+pytorch = store.add_node(Node(
+    label="Framework",
+    properties={"name": "PyTorch"},
+    embedding=embedder.embed("PyTorch deep learning framework")
+))
+
+store.add_edge(Edge(src_id=alice.id, dst_id=pytorch.id, label="USES", weight=1.0))
+
+# 2. Initialize JEPA-GraphRAG
+jepa = JEPAGraphRAG(store, embedder, latent_dim=64, use_torch=False)
+
+# 3. Train world model
+contexts = ["machine learning engineer"]
+targets = ["PyTorch deep learning"]
+
+for epoch in range(5):
+    loss_dict = jepa.train_step(contexts, targets)
+    print(f"Epoch {epoch+1}: loss={loss_dict['total']:.4f}")
+
+# 4. Precompute embeddings
+jepa.precompute_community_embeddings()
+
+# 5. Hybrid search
+results = jepa.hybrid_search("Python ML engineer", k=3)
+
+print("Local results:")
+for node, score in results['local']:
+    print(f"  {score:.3f} - {node.properties.get('name')}")
+
+print("\nLatent results:")
+for node, dist in results['latent_node']:
+    print(f"  {dist:.4f} - {node.properties.get('name')}")
+```
+
+---
+
+### Backend Options
+
+#### Numpy (default, lightweight)
+- Pure Python + numpy
+- No GPU required
+- Suitable for small-medium graphs (< 10k nodes)
+
+```python
+jepa = JEPAGraphRAG(store, embedder, use_torch=False)
+```
+
+#### PyTorch (optional, accelerated)
+- Requires `pip install torch`
+- GPU acceleration if available
+- Suitable for large graphs (10k+ nodes)
+
+```python
+jepa = JEPAGraphRAG(store, embedder, use_torch=True)
+```
+
+---
+
+### API Reference
+
+#### `CommunityDetector`
+
+```python
+CommunityDetector(store: GraphStore, resolution: float = 1.0)
+```
+
+**Methods:**
+- `detect_communities() -> Dict[str, int]` — returns `{node_id: community_id}`
+
+---
+
+#### `GraphRAGRetriever`
+
+```python
+GraphRAGRetriever(
+    store: GraphStore,
+    embedder: Optional[Embedder] = None,
+    community_cache: Optional[Dict[str, int]] = None
+)
+```
+
+**Properties:**
+- `communities: Dict[str, int]` — cached community assignments
+
+**Methods:**
+- `local_search(query, k, max_hops, label) -> List[Tuple[Node, float]]`
+- `global_search(query, k, label) -> List[Tuple[int, List[Node], float]]`
+- `get_community_summary(community_id) -> str`
+- `rebuild_communities() -> Dict[str, int]`
+
+---
+
+#### `JEPAGraphRAG`
+
+```python
+JEPAGraphRAG(
+    store: GraphStore,
+    embedder: Optional[Embedder] = None,
+    latent_dim: int = 128,
+    use_torch: bool = None  # auto-detects if not specified
+)
+```
+
+**Properties:**
+- `retriever: GraphRAGRetriever` — underlying GraphRAG retriever
+- `use_torch: bool` — backend indicator
+
+**Methods:**
+- `train_step(contexts, targets, learning_rate, ema_alpha) -> Dict[str, float]`
+- `precompute_community_embeddings() -> None`
+- `latent_search(query, k, mode) -> List[Tuple[Union[int, Node], float]]`
+- `hybrid_search(query, k, use_local, use_global, use_latent) -> Dict[str, Any]`
 
 ---
 
