@@ -254,3 +254,210 @@ fn test_delete_node_cascades_edges() {
     assert_eq!(store.edge_count(), 0);
     assert!(store.get_node(&a.id).is_err());
 }
+
+
+// ── Community detection ──────────────────────────────────────────────────────
+
+#[test]
+fn test_community_detection_connected_graph() {
+    use graphdb_rs::community::CommunityDetector;
+    let mut store = GraphStore::new();
+    let a = store.add_node(Node::new("N")).unwrap();
+    let b = store.add_node(Node::new("N")).unwrap();
+    let c = store.add_node(Node::new("N")).unwrap();
+    store.add_edge(Edge::new(&a.id, &b.id, "E"), 1.0).unwrap();
+    store.add_edge(Edge::new(&b.id, &c.id, "E"), 1.0).unwrap();
+
+    let detector = CommunityDetector::new(1.0);
+    let partition = detector.detect_communities(&store);
+
+    assert_eq!(partition.len(), 3);
+    // All three nodes should end up in the same community (they form a chain).
+    let comms: Vec<usize> = vec![
+        *partition.get(&a.id).unwrap(),
+        *partition.get(&b.id).unwrap(),
+        *partition.get(&c.id).unwrap(),
+    ];
+    assert_eq!(comms[0], comms[1]);
+    assert_eq!(comms[1], comms[2]);
+}
+
+#[test]
+fn test_community_detection_isolated_nodes() {
+    use graphdb_rs::community::CommunityDetector;
+    let mut store = GraphStore::new();
+    let a = store.add_node(Node::new("N")).unwrap();
+    let b = store.add_node(Node::new("N")).unwrap();
+    // No edges: each node stays in its own community.
+
+    let detector = CommunityDetector::new(1.0);
+    let partition = detector.detect_communities(&store);
+
+    assert_eq!(partition.len(), 2);
+    assert_ne!(partition.get(&a.id).unwrap(), partition.get(&b.id).unwrap());
+}
+
+#[test]
+fn test_community_detection_empty_graph() {
+    use graphdb_rs::community::CommunityDetector;
+    let store = GraphStore::new();
+    let detector = CommunityDetector::new(1.0);
+    let partition = detector.detect_communities(&store);
+    assert!(partition.is_empty());
+}
+
+// ── GraphRAG retriever ───────────────────────────────────────────────────────
+
+#[test]
+fn test_graphrag_local_search_returns_results() {
+    use graphdb_rs::graphrag::GraphRAGRetriever;
+    let mut store = GraphStore::new();
+    let q = vec![1.0_f32, 0.0, 0.0];
+    let a = store.add_node(node_with_emb("Doc", vec![1.0, 0.0, 0.0])).unwrap();
+    let b = store.add_node(node_with_emb("Doc", vec![0.0, 1.0, 0.0])).unwrap();
+    store.add_edge(Edge::new(&a.id, &b.id, "LINKS"), 1.0).unwrap();
+
+    let mut retriever = GraphRAGRetriever::new(1.0);
+    let results = retriever.local_search(&store, &q, 2, 1, None).unwrap();
+
+    assert!(!results.is_empty());
+    // a should be highest scoring (cosine 1.0).
+    assert_eq!(results[0].0, a.id);
+    assert!((results[0].1 - 1.0).abs() < 1e-5);
+    // b is one hop from a and should also be included.
+    assert!(results.iter().any(|(id, _)| id == &b.id));
+}
+
+#[test]
+fn test_graphrag_global_search_returns_communities() {
+    use graphdb_rs::graphrag::GraphRAGRetriever;
+    let mut store = GraphStore::new();
+    let q = vec![1.0_f32, 0.0, 0.0];
+    store.add_node(node_with_emb("Doc", vec![1.0, 0.0, 0.0])).unwrap();
+    store.add_node(node_with_emb("Doc", vec![0.9, 0.1, 0.0])).unwrap();
+
+    let mut retriever = GraphRAGRetriever::new(1.0);
+    let results = retriever.global_search(&store, &q, 3, None).unwrap();
+
+    assert!(!results.is_empty());
+    for (_, node_ids, score) in &results {
+        assert!(!node_ids.is_empty());
+        assert!(*score >= 0.0);
+    }
+}
+
+#[test]
+fn test_graphrag_community_summary() {
+    use graphdb_rs::graphrag::GraphRAGRetriever;
+    use std::collections::HashSet;
+    let mut store = GraphStore::new();
+    store.add_node(Node::new("User")).unwrap();
+    store.add_node(Node::new("User")).unwrap();
+    store.add_node(Node::new("Post")).unwrap();
+
+    let mut retriever = GraphRAGRetriever::new(1.0);
+    retriever.rebuild_communities(&store);
+
+    let partition = retriever.communities(&store).clone();
+    let comm_ids: HashSet<usize> = partition.values().copied().collect();
+    for comm_id in comm_ids {
+        let summary = retriever.get_community_summary(&store, comm_id);
+        assert!(summary.contains(&format!("Community {}", comm_id)));
+    }
+}
+
+// ── JEPA ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_jepa_train_step_returns_losses() {
+    use graphdb_rs::jepa::JEPAGraphRAG;
+    use ndarray::Array2;
+
+    let mut jepa = JEPAGraphRAG::new(8, 16, 1.0);
+    let batch_size = 4;
+    let input_dim = 8;
+
+    let ctx_data: Vec<f32> = (0..batch_size * input_dim).map(|i| (i as f32) * 0.1).collect();
+    let tgt_data: Vec<f32> = (0..batch_size * input_dim).map(|i| (i as f32) * 0.05 + 0.5).collect();
+
+    let ctx = Array2::from_shape_vec((batch_size, input_dim), ctx_data).unwrap();
+    let tgt = Array2::from_shape_vec((batch_size, input_dim), tgt_data).unwrap();
+
+    let loss = jepa.train_step(ctx, tgt, 0.99);
+
+    assert!(loss.total.is_finite());
+    assert!(loss.sim.is_finite());
+    assert!(loss.var.is_finite());
+    assert!(loss.cov.is_finite());
+    assert!(loss.total >= 0.0);
+}
+
+#[test]
+fn test_jepa_latent_search_communities() {
+    use graphdb_rs::jepa::JEPAGraphRAG;
+    let mut store = GraphStore::new();
+    store.add_node(node_with_emb("N", vec![1.0, 0.0, 0.0, 0.0])).unwrap();
+    store.add_node(node_with_emb("N", vec![0.0, 1.0, 0.0, 0.0])).unwrap();
+
+    let mut jepa = JEPAGraphRAG::new(4, 8, 1.0);
+    jepa.precompute_community_embeddings(&store);
+
+    let results = jepa.latent_search_communities(&[1.0, 0.0, 0.0, 0.0], 2);
+    assert!(!results.is_empty());
+    for (_, dist) in &results {
+        assert!(dist.is_finite());
+        assert!(*dist >= 0.0);
+    }
+}
+
+#[test]
+fn test_jepa_latent_search_nodes() {
+    use graphdb_rs::jepa::JEPAGraphRAG;
+    let mut store = GraphStore::new();
+    let a = store.add_node(node_with_emb("N", vec![1.0, 0.0, 0.0, 0.0])).unwrap();
+    let b = store.add_node(node_with_emb("N", vec![0.0, 1.0, 0.0, 0.0])).unwrap();
+
+    let jepa = JEPAGraphRAG::new(4, 8, 1.0);
+    let results = jepa.latent_search_nodes(&store, &[1.0, 0.0, 0.0, 0.0], 2);
+
+    assert_eq!(results.len(), 2);
+    let ids: Vec<&str> = results.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(ids.contains(&a.id.as_str()));
+    assert!(ids.contains(&b.id.as_str()));
+}
+
+#[test]
+fn test_jepa_hybrid_search() {
+    use graphdb_rs::jepa::JEPAGraphRAG;
+    let mut store = GraphStore::new();
+    let a = store.add_node(node_with_emb("N", vec![1.0, 0.0, 0.0, 0.0])).unwrap();
+    let b = store.add_node(node_with_emb("N", vec![0.0, 1.0, 0.0, 0.0])).unwrap();
+    store.add_edge(Edge::new(&a.id, &b.id, "E"), 1.0).unwrap();
+
+    let mut jepa = JEPAGraphRAG::new(4, 8, 1.0);
+    jepa.precompute_community_embeddings(&store);
+
+    let query = vec![1.0_f32, 0.0, 0.0, 0.0];
+    let result = jepa.hybrid_search(&store, &query, 2, true, true, true).unwrap();
+
+    assert!(result.local.is_some());
+    assert!(result.global.is_some());
+    assert!(result.latent_communities.is_some());
+    assert!(result.latent_nodes.is_some());
+}
+
+#[test]
+fn test_vicreg_loss_correctness() {
+    use graphdb_rs::jepa::vicreg_loss;
+    use ndarray::Array2;
+
+    let batch = 4;
+    let dim = 8;
+
+    // Identical predictions → sim_loss = 0.
+    let z_data: Vec<f32> = (0..batch * dim).map(|i| (i as f32) * 0.1).collect();
+    let z = Array2::from_shape_vec((batch, dim), z_data).unwrap();
+    let loss = vicreg_loss(&z, &z, 25.0, 25.0, 1.0, 1e-4);
+    assert!(loss.sim.abs() < 1e-5, "identical inputs should give zero sim loss");
+    assert!(loss.total.is_finite());
+}
