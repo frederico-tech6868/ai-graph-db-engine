@@ -6,9 +6,12 @@
 //! * A Python extension module (built with PyO3 + maturin) that wraps the Rust
 //!   API. Rust errors are mapped to idiomatic Python exceptions.
 
+pub mod community;
 pub mod core;
 pub mod error;
+pub mod graphrag;
 pub mod index;
+pub mod jepa;
 pub mod persistence;
 pub mod query;
 pub mod similarity;
@@ -21,9 +24,13 @@ use pyo3::exceptions::{PyIOError, PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+use crate::community::CommunityDetector;
 use crate::core::{Edge, Node, PropertyValue};
 use crate::error::GraphError;
+use crate::graphrag::GraphRAGRetriever;
+use crate::jepa::JEPAGraphRAG;
 use crate::store::GraphStore;
+use ndarray::Array2;
 
 // --------------------------------------------------------------------------
 // Error mapping
@@ -397,6 +404,190 @@ fn find_path(
     query::find_path(&store.inner, src_id, dst_id).map_err(to_pyerr)
 }
 
+// --------------------------------------------------------------------------
+// JEPA-GraphRAG Python wrappers
+// --------------------------------------------------------------------------
+//
+// Note: the existing `PyGraphStore` owns its `GraphStore` directly (it is not
+// shared behind an `Arc<Mutex<..>>`). To avoid modifying that established type,
+// these wrappers take the store as an explicit argument on each call rather
+// than capturing it at construction time. They keep their own mutable state
+// (community cache / trained weights) across calls via `&mut self`.
+
+/// Python-facing Louvain community detector.
+#[pyclass(name = "CommunityDetector")]
+pub struct PyCommunityDetector {
+    resolution: f64,
+}
+
+#[pymethods]
+impl PyCommunityDetector {
+    #[new]
+    #[pyo3(signature = (resolution=1.0))]
+    fn new(resolution: f64) -> Self {
+        Self { resolution }
+    }
+
+    /// Returns dict[node_id, community_id] for the given store.
+    fn detect_communities(&self, store: &PyGraphStore) -> HashMap<String, usize> {
+        let detector = CommunityDetector::new(self.resolution);
+        detector.detect_communities(&store.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("CommunityDetector(resolution={})", self.resolution)
+    }
+}
+
+/// Python-facing GraphRAG retriever.
+#[pyclass(name = "GraphRAGRetriever")]
+pub struct PyGraphRAGRetriever {
+    retriever: GraphRAGRetriever,
+}
+
+#[pymethods]
+impl PyGraphRAGRetriever {
+    #[new]
+    #[pyo3(signature = (resolution=1.0))]
+    fn new(resolution: f64) -> Self {
+        Self {
+            retriever: GraphRAGRetriever::new(resolution),
+        }
+    }
+
+    fn rebuild_communities(&mut self, store: &PyGraphStore) {
+        self.retriever.rebuild_communities(&store.inner);
+    }
+
+    /// Returns list of (node_id, score) sorted descending.
+    #[pyo3(signature = (store, query_emb, k=5, max_hops=2, label=None))]
+    fn local_search(
+        &mut self,
+        store: &PyGraphStore,
+        query_emb: Vec<f32>,
+        k: usize,
+        max_hops: usize,
+        label: Option<&str>,
+    ) -> PyResult<Vec<(String, f32)>> {
+        self.retriever
+            .local_search(&store.inner, &query_emb, k, max_hops, label)
+            .map_err(to_pyerr)
+    }
+
+    /// Returns list of (community_id, node_ids, score) sorted descending.
+    #[pyo3(signature = (store, query_emb, k=3, label=None))]
+    fn global_search(
+        &mut self,
+        store: &PyGraphStore,
+        query_emb: Vec<f32>,
+        k: usize,
+        label: Option<&str>,
+    ) -> PyResult<Vec<(usize, Vec<String>, f32)>> {
+        self.retriever
+            .global_search(&store.inner, &query_emb, k, label)
+            .map_err(to_pyerr)
+    }
+
+    fn get_community_summary(&mut self, store: &PyGraphStore, community_id: usize) -> String {
+        self.retriever
+            .get_community_summary(&store.inner, community_id)
+    }
+
+    fn __repr__(&self) -> String {
+        "GraphRAGRetriever".to_string()
+    }
+}
+
+/// Python-facing JEPAGraphRAG.
+#[pyclass(name = "JEPAGraphRAG")]
+pub struct PyJEPAGraphRAG {
+    jepa: JEPAGraphRAG,
+}
+
+#[pymethods]
+impl PyJEPAGraphRAG {
+    #[new]
+    #[pyo3(signature = (input_dim, latent_dim=128, resolution=1.0))]
+    fn new(input_dim: usize, latent_dim: usize, resolution: f64) -> Self {
+        Self {
+            jepa: JEPAGraphRAG::new(input_dim, latent_dim, resolution),
+        }
+    }
+
+    /// Returns (total_loss, sim_loss, var_loss, cov_loss).
+    /// `contexts` and `targets` are flat row-major lists (batch_size * input_dim).
+    #[pyo3(signature = (contexts, targets, batch_size, ema_alpha=0.99))]
+    fn train_step(
+        &mut self,
+        contexts: Vec<f32>,
+        targets: Vec<f32>,
+        batch_size: usize,
+        ema_alpha: f32,
+    ) -> PyResult<(f32, f32, f32, f32)> {
+        if batch_size == 0 {
+            return Err(PyValueError::new_err("batch_size must be > 0"));
+        }
+        let input_dim = contexts.len() / batch_size;
+        let ctx = Array2::from_shape_vec((batch_size, input_dim), contexts)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let tgt = Array2::from_shape_vec((batch_size, input_dim), targets)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let loss = self.jepa.train_step(ctx, tgt, ema_alpha);
+        Ok((loss.total, loss.sim, loss.var, loss.cov))
+    }
+
+    fn precompute_community_embeddings(&mut self, store: &PyGraphStore) {
+        self.jepa.precompute_community_embeddings(&store.inner);
+    }
+
+    /// Returns list of (community_id, l2_distance) sorted ascending.
+    #[pyo3(signature = (query_emb, k=3))]
+    fn latent_search_communities(&self, query_emb: Vec<f32>, k: usize) -> Vec<(usize, f32)> {
+        self.jepa.latent_search_communities(&query_emb, k)
+    }
+
+    /// Returns list of (node_id, l2_distance) sorted ascending.
+    #[pyo3(signature = (store, query_emb, k=5))]
+    fn latent_search_nodes(
+        &self,
+        store: &PyGraphStore,
+        query_emb: Vec<f32>,
+        k: usize,
+    ) -> Vec<(String, f32)> {
+        self.jepa.latent_search_nodes(&store.inner, &query_emb, k)
+    }
+
+    /// Returns dict with keys "local", "global", "latent_communities",
+    /// "latent_nodes". Each maps to a list (or None if that mode was disabled).
+    #[pyo3(signature = (store, query_emb, k=5, use_local=true, use_global=true, use_latent=true))]
+    fn hybrid_search(
+        &mut self,
+        py: Python<'_>,
+        store: &PyGraphStore,
+        query_emb: Vec<f32>,
+        k: usize,
+        use_local: bool,
+        use_global: bool,
+        use_latent: bool,
+    ) -> PyResult<PyObject> {
+        let result = self
+            .jepa
+            .hybrid_search(&store.inner, &query_emb, k, use_local, use_global, use_latent)
+            .map_err(to_pyerr)?;
+
+        let dict = PyDict::new_bound(py);
+        dict.set_item("local", result.local.into_py(py))?;
+        dict.set_item("global", result.global.into_py(py))?;
+        dict.set_item("latent_communities", result.latent_communities.into_py(py))?;
+        dict.set_item("latent_nodes", result.latent_nodes.into_py(py))?;
+        Ok(dict.into_py(py))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("JEPAGraphRAG(latent_dim={})", self.jepa.latent_dim)
+    }
+}
+
 /// The Python extension module.
 #[pymodule]
 fn graphdb_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -405,6 +596,9 @@ fn graphdb_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySimilarMatch>()?;
     m.add_class::<PyAddEdgeResult>()?;
     m.add_class::<PyGraphStore>()?;
+    m.add_class::<PyCommunityDetector>()?;
+    m.add_class::<PyGraphRAGRetriever>()?;
+    m.add_class::<PyJEPAGraphRAG>()?;
     m.add_function(wrap_pyfunction!(bfs, m)?)?;
     m.add_function(wrap_pyfunction!(dfs, m)?)?;
     m.add_function(wrap_pyfunction!(find_path, m)?)?;
