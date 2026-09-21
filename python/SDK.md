@@ -37,10 +37,16 @@
    - [GraphRAG Retrieval](#graphrag-retrieval)
    - [Graph-JEPA World Model](#graph-jepa-world-model)
    - [Hybrid Search](#hybrid-search)
-9. [Usage Patterns](#usage-patterns)
-10. [Examples](#examples)
-11. [Best Practices](#best-practices)
-12. [Troubleshooting](#troubleshooting)
+9. [JEPA-Needle Integration](#jepa-needle-integration)
+   - [JEPANeedleAgent](#jepaneedleagent)
+   - [Multi-mode Search](#multi-mode-search)
+   - [Community Tools](#community-tools)
+   - [World-Model Training](#world-model-training)
+   - [JEPAOrchestrator](#jepaorchestrator)
+10. [Usage Patterns](#usage-patterns)
+11. [Examples](#examples)
+12. [Best Practices](#best-practices)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1330,6 +1336,145 @@ JEPAGraphRAG(
 
 ---
 
+## JEPA-Needle Integration
+
+The JEPA-Needle integration marries the two subsystems above:
+
+- **Needle2** (`ai_memory.needle_agent`) — compact, embedded function-calling
+  agents whose tools call back into the graph.
+- **JEPA-GraphRAG** (`ai_memory.jepa_graphrag`) — community detection plus
+  local / global / latent / hybrid retrieval and a self-supervised Graph-JEPA
+  world model.
+
+Two classes bring them together:
+
+- **`JEPANeedleAgent`** — a drop-in `NeedleAgentGroup` whose graph-backed tools
+  route through a shared `JEPAGraphRAG` instance, upgrading the agent from plain
+  similarity search to multi-mode retrieval, and adding community-level tools.
+- **`JEPAOrchestrator`** — a `NeedleOrchestrator` that routes queries by
+  **JEPA-GraphRAG content relevance** (which group actually knows the most about
+  the query) instead of matching the query against group names, with the
+  Graph-JEPA latent energy used only to break near-ties.
+
+Everything except *live Needle inference* (`.run()` / `.agent`) works without
+`cactus-needle` installed; the JEPA machinery needs only numpy (torch optional).
+
+```python
+from ai_memory.jepa_needle import JEPANeedleAgent, JEPAOrchestrator
+```
+
+### JEPANeedleAgent
+
+```python
+from ai_memory.document_loader import DocumentLoader
+
+# chunk_overlap MUST be < chunk_size
+loader = DocumentLoader(chunk_size=200, chunk_overlap=40, min_chunk_len=20)
+
+legal = JEPANeedleAgent("legal", loader=loader, default_search_mode="hybrid")
+legal.ingest(["contract.pdf", "policy.docx"])
+```
+
+**Constructor** — same parameters as `NeedleAgentGroup`, plus:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `latent_dim` | `128` | Graph-JEPA latent space dimensionality |
+| `use_torch` | `None` | Force torch backend (`None` = auto-detect) |
+| `default_search_mode` | `"hybrid"` | Mode used by `search_knowledge_base` when unspecified: `local` / `global` / `latent` / `hybrid` |
+
+If `tool_schemas` is omitted the agent uses `JEPA_TOOL_SCHEMAS` (see below).
+The shared retriever/world-model is exposed lazily via the `.jepa` property and
+is always bound to the group's own `GraphStore` and embedder.
+
+### Multi-mode Search
+
+`JEPANeedleAgent.search()` is the exact function the Needle
+`search_knowledge_base` tool wraps — callable directly for programmatic use:
+
+```python
+out = legal.search("termination clause", k=5, mode="hybrid", doc_type="")
+# {"results": [{"text","source","doc_type","node_id","score"}, ...],
+#  "count": 5, "mode": "hybrid"}
+```
+
+| Mode | Backing call | Best for |
+|------|--------------|----------|
+| `local` | `retriever.local_search` (k-hop) | pinpoint passages near the best match |
+| `global` | `retriever.global_search` (communities) | broad / thematic questions |
+| `latent` | `jepa.latent_search(mode="node")` | energy-based semantic recall |
+| `hybrid` | fuses local + latent, de-duplicated | general default |
+
+Results are always sorted by descending score and capped at `k`; an optional
+`doc_type` filters by document type.
+
+### Community Tools
+
+Two extra tools are exposed to the agent (and callable directly):
+
+```python
+legal.search_communities("contract obligations", k=3)
+# {"communities": [{"community_id","size","score","summary"}, ...], "count": 3}
+
+legal.community_summary(2)
+# {"community_id": 2, "summary": "Community 2: ..."}
+```
+
+### World-Model Training
+
+Self-supervised training of the Graph-JEPA world model using each node's text
+as context and its graph neighbours' text as targets (VICReg loss, EMA target
+encoder). Safe no-op on an empty graph.
+
+```python
+history = legal.train_world_model(epochs=3)   # -> [{"total","sim","var","cov"}, ...]
+legal.rebuild_index()   # invalidate cached communities/latent after new ingest
+```
+
+### JEPAOrchestrator
+
+```python
+tech = JEPANeedleAgent("tech", loader=loader)
+tech.ingest(["api_docs.md"])
+
+orch = JEPAOrchestrator([legal, tech])   # use_latent=True, latent_margin=0.05
+orch.route("JWT bearer token authentication").name   # -> "tech"
+orch.route("contract termination liability").name    # -> "legal"
+
+result = orch.run("What are the termination clauses?")  # needs cactus-needle
+# result["routed_to"] -> selected group name
+```
+
+Routing scores each group by its best JEPA-GraphRAG content match
+(`retriever.local_search` similarity). When two groups are within
+`latent_margin` of each other, the Graph-JEPA latent energy breaks the tie.
+If no group has matching content, it falls back to the base-class
+text-embedding router. Set `use_latent=False` to route on content only.
+
+### JEPA_TOOL_SCHEMAS
+
+Needle-compatible tool schemas used by `JEPANeedleAgent` (max 5, Needle's
+limit):
+
+| Tool | Purpose |
+|------|---------|
+| `search_knowledge_base` | multi-mode retrieval with a `mode` enum |
+| `search_communities` | rank graph communities for a query |
+| `get_community_summary` | summarize a community by id |
+| `list_documents` | list ingested documents |
+| `get_document_chunks` | fetch all chunks of one document |
+
+**Key classes / functions:**
+- `JEPANeedleAgent(name, ..., latent_dim=128, use_torch=None, default_search_mode="hybrid")`
+- `JEPANeedleAgent.search(query, k, mode, doc_type) -> Dict[str, Any]`
+- `JEPANeedleAgent.search_communities(query, k) -> Dict[str, Any]`
+- `JEPANeedleAgent.train_world_model(epochs, learning_rate, ema_alpha) -> List[Dict[str, float]]`
+- `JEPAOrchestrator(groups, embedder=None, use_latent=True, latent_margin=0.05)`
+- `JEPAOrchestrator.route(query) -> Optional[JEPANeedleAgent]`
+- `JEPA_TOOL_SCHEMAS`
+
+---
+
 ## Usage Patterns
 
 ### Pattern 1: Single-Agent Long-Term Memory
@@ -2107,6 +2252,7 @@ You now have everything you need to integrate the **AI-GraphDB-Engine** into you
 7. **Persist** — `store.save(path)`
 8. **Train** — `DatasetBuilder` to turn local docs into fine-tuning datasets
 9. **Needle2** — `NeedleAgentGroup` + `NeedleOrchestrator` for trainable embedded function-calling agents
+10. **JEPA-Needle** — `JEPANeedleAgent` + `JEPAOrchestrator` give Needle agents JEPA-GraphRAG multi-mode retrieval and content-relevance routing
 
 The graph holds **everything**; retrieval surfaces **only what's relevant**. Your LLM never overflows, and nothing is lost.
 

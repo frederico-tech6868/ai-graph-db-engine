@@ -34,6 +34,11 @@ from .jepa_graphrag import (
     CommunityDetector,
     GraphRAGRetriever,
 )
+from .jepa_needle import (
+    JEPA_TOOL_SCHEMAS,
+    JEPANeedleAgent,
+    JEPAOrchestrator,
+)
 from .recall import RecallEngine, RecalledMemory
 from .schema import (
     AGENT,
@@ -75,6 +80,10 @@ __all__ = [
     "JEPAGraphRAG",
     "CommunityDetector",
     "GraphRAGRetriever",
+    # jepa-needle
+    "JEPA_TOOL_SCHEMAS",
+    "JEPANeedleAgent",
+    "JEPAOrchestrator",
     # tools
     "MEMORY_TOOLS",
     "MemoryToolExecutor",
