@@ -58,6 +58,8 @@ pub struct QuantizedLlama {
     name: String,
     architecture: String,
     eos_token: u32,
+    /// Maximum context window in tokens read from GGUF metadata, if present.
+    ctx_len: Option<usize>,
 }
 
 impl QuantizedLlama {
@@ -86,6 +88,14 @@ impl QuantizedLlama {
             .and_then(|v| v.to_string().ok())
             .cloned()
             .unwrap_or_else(|| "llama".to_string());
+
+        // Read context window size BEFORE from_gguf consumes `content`.
+        // Stored under "{arch}.context_length" (e.g. "qwen2.context_length").
+        let ctx_len = content
+            .metadata
+            .get(&format!("{architecture}.context_length"))
+            .and_then(|v| v.to_u64().ok())
+            .map(|n| n as usize);
 
         let model = match architecture.as_str() {
             "llama" | "mistral" | "mixtral" | "stablelm" | "starcoder2" => {
@@ -170,6 +180,7 @@ impl QuantizedLlama {
             name,
             architecture,
             eos_token,
+            ctx_len,
         })
     }
 
@@ -256,6 +267,19 @@ impl TextModel for QuantizedLlama {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Token count using the real tokenizer (not the char/4 approximation).
+    fn count_tokens(&self, text: &str) -> usize {
+        self.tokenizer
+            .encode(text, false)
+            .map(|enc| enc.len())
+            .unwrap_or_else(|_| (text.len() + 3) / 4)
+    }
+
+    /// Context window as reported by the GGUF `{arch}.context_length` metadata.
+    fn context_length(&self) -> Option<usize> {
+        self.ctx_len
     }
 }
 
