@@ -433,6 +433,34 @@ cargo run -p graphdb-cli -- \
 
 The CLI will load the GGUF file via `candle-transformers` and run genuine inference. The `--model`/`--tokenizer` flags apply globally to **all** subcommands (including `agent`, `rag`, `ask`, etc.).
 
+#### Supported model architectures (not just Llama)
+
+The loader inspects the GGUF's `general.architecture` metadata field and dispatches to the matching `candle-transformers` parser automatically. You do **not** need to tell it which family a model is — just point `--model` at the `.gguf`. Supported architectures:
+
+| `general.architecture` | Parser used | Example models |
+| --- | --- | --- |
+| `llama`, `mistral`, `mixtral` | `quantized_llama` | Llama 2/3, Mistral, Mixtral, TinyLlama |
+| `qwen2` | `quantized_qwen2` | Qwen2 / Qwen2.5 |
+| `qwen3` | `quantized_qwen3` | Qwen3 |
+| `gemma`, `gemma2`, `gemma3` | `quantized_gemma3` | Gemma / Gemma 2 / Gemma 3 |
+| `phi3` | `quantized_phi3` | Phi-3 / Phi-3.5 |
+| `phi2`, `phi` | `quantized_phi` | Phi-2 |
+| `glm4`, `chatglm` | `quantized_glm4` | GLM-4 |
+| *(anything else)* | falls back to `quantized_llama` | best-effort |
+
+> **Why this matters:** earlier the loader always used the Llama parser, so loading a Qwen/Gemma/Phi GGUF failed with an error like:
+> ```
+> failed to load model: from_gguf: cannot find llama.attention.head_count in metadata
+> ```
+> That error means the GGUF was **not** a Llama-layout file — its metadata keys are prefixed with `qwen2.`, `gemma3.`, etc., not `llama.`. The architecture-aware dispatch now selects the correct parser, so those models load correctly. If you still hit `unsupported GGUF architecture "..."`, the model family isn't wired up yet — open an issue or use a Llama/Qwen/Gemma/Phi GGUF instead.
+>
+> **Check a file's architecture** before downloading gigabytes:
+> ```python
+> from gguf import GGUFReader
+> r = GGUFReader("model.gguf")
+> print(r.fields["general.architecture"].parts[-1].tobytes().decode())
+> ```
+
 ### Where to Get Models
 
 GGUF is the quantized model format used by `llama.cpp` and supported here via `candle`. To swap in a real model:
@@ -476,32 +504,58 @@ cargo run -p graphdb-cli -- \
 
 ### GPU Acceleration
 
-GPU backends are **off by default**. Enable them with cargo features:
+GPU backends are **off by default** to keep builds fast and portable. To enable GPU acceleration, you must **rebuild** with the corresponding Cargo feature flag — just passing `--device cuda` at runtime won't work if the binary wasn't compiled with GPU support.
+
+#### NVIDIA CUDA
 
 ```bash
-# NVIDIA CUDA:
-cargo run -p graphdb-cli --features cuda -- \
+# Build with CUDA support (one-time):
+cargo build -p graphdb-cli --features cuda --release
+
+# Then run with --device cuda:
+./target/release/graphdb-cli \
   --device cuda \
   --model /path/to/model.gguf \
   --tokenizer /path/to/tokenizer.json \
-  generate "..."
+  agent
 
-# Apple Metal:
-cargo run -p graphdb-cli --features metal -- \
+# Or via cargo run (rebuilds if needed):
+cargo run -p graphdb-cli --features cuda --release -- \
+  --device cuda \
+  --model /path/to/model.gguf \
+  --tokenizer /path/to/tokenizer.json \
+  agent
+```
+
+**Requirements:** CUDA toolkit 11.x or 12.x, cuDNN. Install via [NVIDIA's docs](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/).
+
+#### Apple Metal (M1/M2/M3)
+
+```bash
+# Build with Metal support (one-time):
+cargo build -p graphdb-cli --features metal --release
+
+# Then run with --device metal:
+./target/release/graphdb-cli \
   --device metal \
   --model /path/to/model.gguf \
   --tokenizer /path/to/tokenizer.json \
-  generate "..."
+  agent
 ```
 
-Available features (per crate):
-- `cuda` — NVIDIA GPU (via cuDNN)
-- `metal` — Apple GPU (M1/M2/M3)
-- `rocm` — AMD GPU (experimental)
-- `mkl` — Intel MKL (CPU acceleration)
-- `flash-attn` — Flash Attention 2 (CUDA only)
+**Requirements:** macOS 12.3+ with Apple Silicon. No additional setup needed.
 
-Without a feature flag, everything runs on CPU.
+#### Available Features
+
+| Feature | Backend | Notes |
+|---------|---------|-------|
+| `cuda` | NVIDIA GPU | via cuDNN; requires CUDA toolkit |
+| `metal` | Apple GPU | M1/M2/M3; macOS only |
+| `rocm` | AMD GPU | experimental; Linux only |
+| `mkl` | Intel MKL | CPU acceleration for x86 |
+| `flash-attn` | Flash Attention 2 | CUDA only; faster attention |
+
+> **Tip:** You can set `"device": "cuda"` in [`settings.json`](#configuration-settingsjson) so you never have to type the flag again — but remember the binary must still be compiled with `--features cuda`.
 
 ---
 
