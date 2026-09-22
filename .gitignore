@@ -11,3 +11,7 @@ target/
 # OS
 .DS_Store
 webui_graph.json
+# Example output artifacts
+*.ppm
+generated.*
+.logs/

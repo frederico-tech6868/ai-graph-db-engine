@@ -25,6 +25,8 @@ pub mod hub;
 pub mod models;
 pub mod needle;
 pub mod pipeline;
+pub mod scrape;
+pub mod vision;
 
 pub use backend::{ChunkInfo, DocumentInfo, GraphBackend, SearchResult};
 pub use error::{ModelHubError, Result};
@@ -38,4 +40,9 @@ pub use needle::{NeedleAgent, NeedleOrchestrator};
 pub use pipeline::{
     graphdb_tool_schemas, EngineKind, Orchestrator, PipelineConfig, RagPipeline,
     StructuredExtractor, ToolCall, ToolExecutor, ToolSchema,
+};
+pub use scrape::WebScraper;
+pub use vision::{
+    BBox, GeneratedImage, ImageGenConfig, ImageGenerator, ImageSegmenter, OcrLine,
+    SegmentationMask, StubImageGenerator, StubImageSegmenter, StubTextRecognizer, TextRecognizer,
 };
