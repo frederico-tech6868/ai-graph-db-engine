@@ -16,6 +16,7 @@ cargo run -p model-hub  --example text_recognition
 cargo run -p model-hub  --example image_generation
 cargo run -p model-hub  --example web_scraping
 cargo run -p model-hub  --example image_segmentation
+cargo run -p model-hub  --example claude_code_agent
 cargo run -p graphdb_rs --example jepa_world_model
 ```
 
