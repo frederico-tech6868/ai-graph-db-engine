@@ -4,9 +4,12 @@
 use std::path::Path;
 
 use candle_core::quantized::gguf_file;
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::quantized_llama::ModelWeights;
+use candle_transformers::models::{
+    quantized_gemma3, quantized_glm4, quantized_llama, quantized_phi, quantized_phi3,
+    quantized_qwen2, quantized_qwen3,
+};
 use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
@@ -16,18 +19,53 @@ use crate::error::{ModelHubError, Result};
 /// Fixed embedding dimension used by the stub and by hashed pooling.
 pub const EMBED_DIM: usize = 384;
 
-/// A quantized Llama model loaded from a GGUF file, with a Hugging Face
-/// tokenizer, running on candle.
+/// A quantized decoder-only LLM loaded from a GGUF file. Despite the historical
+/// name, this dispatches to the correct candle-transformers parser based on the
+/// `general.architecture` field stored in the GGUF metadata, so it can load
+/// Llama, Qwen2/Qwen3, Gemma, Phi/Phi-3 and GLM-4 checkpoints — not only Llama.
+enum LoadedModel {
+    Llama(quantized_llama::ModelWeights),
+    Qwen2(quantized_qwen2::ModelWeights),
+    Qwen3(quantized_qwen3::ModelWeights),
+    Gemma3(quantized_gemma3::ModelWeights),
+    Phi3(quantized_phi3::ModelWeights),
+    Phi(quantized_phi::ModelWeights),
+    Glm4(quantized_glm4::ModelWeights),
+}
+
+impl LoadedModel {
+    /// Run a forward pass. Every wrapped parser exposes the same
+    /// `forward(&Tensor, offset) -> Result<Tensor>` shape.
+    fn forward(&mut self, input: &Tensor, index_pos: usize) -> candle_core::Result<Tensor> {
+        match self {
+            LoadedModel::Llama(m) => m.forward(input, index_pos),
+            LoadedModel::Qwen2(m) => m.forward(input, index_pos),
+            LoadedModel::Qwen3(m) => m.forward(input, index_pos),
+            LoadedModel::Gemma3(m) => m.forward(input, index_pos),
+            LoadedModel::Phi3(m) => m.forward(input, index_pos),
+            LoadedModel::Phi(m) => m.forward(input, index_pos),
+            LoadedModel::Glm4(m) => m.forward(input, index_pos),
+        }
+    }
+}
+
+/// A quantized LLM loaded from a GGUF file, with a Hugging Face tokenizer,
+/// running on candle.
 pub struct QuantizedLlama {
-    model: ModelWeights,
+    model: LoadedModel,
     tokenizer: Tokenizer,
     device: Device,
     name: String,
+    architecture: String,
     eos_token: u32,
 }
 
 impl QuantizedLlama {
     /// Load a GGUF model file and its tokenizer.
+    ///
+    /// The correct model parser is selected automatically from the GGUF's
+    /// `general.architecture` metadata field. If that field is missing, we fall
+    /// back to the Llama parser (the most common layout).
     pub fn load(
         gguf_path: impl AsRef<Path>,
         tokenizer_path: impl AsRef<Path>,
@@ -38,17 +76,85 @@ impl QuantizedLlama {
             .map_err(|e| ModelHubError::ModelLoad(format!("open gguf: {e}")))?;
         let content = gguf_file::Content::read(&mut file)
             .map_err(|e| ModelHubError::ModelLoad(format!("read gguf: {e}")))?;
-        let model = ModelWeights::from_gguf(content, &mut file, &device)
-            .map_err(|e| ModelHubError::ModelLoad(format!("from_gguf: {e}")))?;
+
+        // Discover the architecture so we can pick the matching parser rather
+        // than blindly using the Llama one (which fails with e.g.
+        // "cannot find llama.attention.head_count in metadata" on Qwen/Gemma/Phi GGUFs).
+        let architecture = content
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok())
+            .cloned()
+            .unwrap_or_else(|| "llama".to_string());
+
+        let model = match architecture.as_str() {
+            "llama" | "mistral" | "mixtral" | "stablelm" | "starcoder2" => {
+                quantized_llama::ModelWeights::from_gguf(content, &mut file, &device)
+                    .map(LoadedModel::Llama)
+            }
+            "qwen2" => quantized_qwen2::ModelWeights::from_gguf(content, &mut file, &device)
+                .map(LoadedModel::Qwen2),
+            "qwen3" => quantized_qwen3::ModelWeights::from_gguf(content, &mut file, &device)
+                .map(LoadedModel::Qwen3),
+            "gemma" | "gemma2" | "gemma3" => {
+                quantized_gemma3::ModelWeights::from_gguf(content, &mut file, &device)
+                    .map(LoadedModel::Gemma3)
+            }
+            "phi3" => {
+                quantized_phi3::ModelWeights::from_gguf(false, content, &mut file, &device)
+                    .map(LoadedModel::Phi3)
+            }
+            "phi2" | "phi" => quantized_phi::ModelWeights::from_gguf(content, &mut file, &device)
+                .map(LoadedModel::Phi),
+            "glm4" | "chatglm" => {
+                quantized_glm4::ModelWeights::from_gguf(content, &mut file, &device, DType::F32)
+                    .map(LoadedModel::Glm4)
+            }
+            // Unknown architecture: try the Llama parser as a best effort.
+            _ => quantized_llama::ModelWeights::from_gguf(content, &mut file, &device)
+                .map(LoadedModel::Llama),
+        }
+        .map_err(|e| {
+            let known = matches!(
+                architecture.as_str(),
+                "llama"
+                    | "mistral"
+                    | "mixtral"
+                    | "stablelm"
+                    | "starcoder2"
+                    | "qwen2"
+                    | "qwen3"
+                    | "gemma"
+                    | "gemma2"
+                    | "gemma3"
+                    | "phi3"
+                    | "phi2"
+                    | "phi"
+                    | "glm4"
+                    | "chatglm"
+            );
+            if known {
+                ModelHubError::ModelLoad(format!("from_gguf ({architecture}): {e}"))
+            } else {
+                ModelHubError::ModelLoad(format!(
+                    "unsupported GGUF architecture {architecture:?}; the Llama fallback parser \
+                     also failed: {e}. Supported architectures: llama, mistral, qwen2, qwen3, \
+                     gemma/gemma2/gemma3, phi, phi3, glm4."
+                ))
+            }
+        })?;
 
         let tokenizer = Tokenizer::from_file(tokenizer_path.as_ref())
             .map_err(|e| ModelHubError::Tokenizer(e.to_string()))?;
 
-        // Resolve a reasonable EOS token id.
+        // Resolve a reasonable EOS token id, covering the common special-token
+        // conventions across Llama, Qwen, Gemma and Phi tokenizers.
         let eos_token = tokenizer
-            .token_to_id("</s>")
-            .or_else(|| tokenizer.token_to_id("<|endoftext|>"))
-            .or_else(|| tokenizer.token_to_id("<|eot_id|>"))
+            .token_to_id("<|im_end|>") // Qwen / ChatML
+            .or_else(|| tokenizer.token_to_id("<end_of_turn>")) // Gemma
+            .or_else(|| tokenizer.token_to_id("<|eot_id|>")) // Llama-3
+            .or_else(|| tokenizer.token_to_id("</s>")) // Llama-2 / Mistral
+            .or_else(|| tokenizer.token_to_id("<|endoftext|>")) // Phi / GPT-style
             .unwrap_or(2);
 
         let name = gguf_path
@@ -62,8 +168,15 @@ impl QuantizedLlama {
             tokenizer,
             device,
             name,
+            architecture,
             eos_token,
         })
+    }
+
+    /// The GGUF `general.architecture` this model was loaded as
+    /// (e.g. `"llama"`, `"qwen2"`, `"gemma3"`).
+    pub fn architecture(&self) -> &str {
+        &self.architecture
     }
 }
 

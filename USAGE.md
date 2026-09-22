@@ -433,6 +433,34 @@ cargo run -p graphdb-cli -- \
 
 The CLI will load the GGUF file via `candle-transformers` and run genuine inference. The `--model`/`--tokenizer` flags apply globally to **all** subcommands (including `agent`, `rag`, `ask`, etc.).
 
+#### Supported model architectures (not just Llama)
+
+The loader inspects the GGUF's `general.architecture` metadata field and dispatches to the matching `candle-transformers` parser automatically. You do **not** need to tell it which family a model is — just point `--model` at the `.gguf`. Supported architectures:
+
+| `general.architecture` | Parser used | Example models |
+| --- | --- | --- |
+| `llama`, `mistral`, `mixtral` | `quantized_llama` | Llama 2/3, Mistral, Mixtral, TinyLlama |
+| `qwen2` | `quantized_qwen2` | Qwen2 / Qwen2.5 |
+| `qwen3` | `quantized_qwen3` | Qwen3 |
+| `gemma`, `gemma2`, `gemma3` | `quantized_gemma3` | Gemma / Gemma 2 / Gemma 3 |
+| `phi3` | `quantized_phi3` | Phi-3 / Phi-3.5 |
+| `phi2`, `phi` | `quantized_phi` | Phi-2 |
+| `glm4`, `chatglm` | `quantized_glm4` | GLM-4 |
+| *(anything else)* | falls back to `quantized_llama` | best-effort |
+
+> **Why this matters:** earlier the loader always used the Llama parser, so loading a Qwen/Gemma/Phi GGUF failed with an error like:
+> ```
+> failed to load model: from_gguf: cannot find llama.attention.head_count in metadata
+> ```
+> That error means the GGUF was **not** a Llama-layout file — its metadata keys are prefixed with `qwen2.`, `gemma3.`, etc., not `llama.`. The architecture-aware dispatch now selects the correct parser, so those models load correctly. If you still hit `unsupported GGUF architecture "..."`, the model family isn't wired up yet — open an issue or use a Llama/Qwen/Gemma/Phi GGUF instead.
+>
+> **Check a file's architecture** before downloading gigabytes:
+> ```python
+> from gguf import GGUFReader
+> r = GGUFReader("model.gguf")
+> print(r.fields["general.architecture"].parts[-1].tobytes().decode())
+> ```
+
 ### Where to Get Models
 
 GGUF is the quantized model format used by `llama.cpp` and supported here via `candle`. To swap in a real model:
