@@ -1,0 +1,28 @@
+[package]
+name = "graphdb-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "graphdb-tui"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = ["model-hub/cuda"]
+rocm = ["model-hub/rocm"]
+metal = ["model-hub/metal"]
+mkl = ["model-hub/mkl"]
+flash-attn = ["model-hub/flash-attn"]
+
+[dependencies]
+model-hub = { path = "../model-hub" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ratatui = "0.28"
+crossterm = "0.28"
