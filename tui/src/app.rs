@@ -51,8 +51,16 @@ pub struct App {
     pub engine: EngineKind,
     /// Whether the app should exit.
     pub should_quit: bool,
+    /// Human-readable source of the settings that were loaded.
+    pub settings_source: String,
     graph: InMemoryGraph,
+    /// The active text model (Chat / RAG).
     model: Box<dyn TextModel>,
+    /// The alternate text model, available when Ctrl+M is pressed.
+    /// `None` means no toggle is possible (footer hides the hint).
+    alt_model: Option<Box<dyn TextModel>>,
+    /// Generation parameters derived from settings.
+    gen: GenerationConfig,
 }
 
 impl Default for App {
@@ -62,9 +70,8 @@ impl Default for App {
 }
 
 impl App {
-    /// Create a new application seeded with a demo knowledge base and a stub
-    /// text model (fully offline).
-    pub fn new() -> Self {
+    /// Seed and return a fresh knowledge-base graph.
+    fn make_graph() -> InMemoryGraph {
         let graph = InMemoryGraph::new();
         graph.ingest(
             "/kb/rust.md",
@@ -88,19 +95,78 @@ impl App {
             "Candle is a minimalist ML framework for Rust with CPU and GPU backends, powering \
              quantized Llama, Whisper, and CLIP models in this project.",
         );
+        graph
+    }
 
+    /// Create a new application with explicit model(s) and generation config.
+    ///
+    /// * `primary`         — the text model used on startup.
+    /// * `alt`             — optional alternate model reachable via Ctrl+M.
+    /// * `gen`             — generation parameters from settings.
+    /// * `settings_source` — human-readable label of where settings came from.
+    pub fn with_models(
+        primary: Box<dyn TextModel>,
+        alt: Option<Box<dyn TextModel>>,
+        gen: GenerationConfig,
+        settings_source: String,
+    ) -> Self {
+        let welcome = if alt.is_some() {
+            "Welcome to graphdb-tui. Type a message and press Enter.\n\
+             Tab: switch mode  |  Ctrl+E: toggle engine  |  Ctrl+M: switch model  |  Esc/Ctrl+Q: quit"
+        } else {
+            "Welcome to graphdb-tui. Type a message and press Enter.\n\
+             Tab: switch mode  |  Ctrl+E: toggle engine  |  Esc/Ctrl+Q: quit"
+        };
         Self {
             mode: Mode::Chat,
             input: String::new(),
-            output: "Welcome to graphdb-tui. Type a message and press Enter.\n\
-                     Tab: switch mode  |  Ctrl+E: toggle engine  |  Esc/Ctrl+Q: quit"
-                .to_string(),
+            output: welcome.to_string(),
             engine: EngineKind::Needle,
             should_quit: false,
-            graph,
-            model: Box::new(StubTextModel::new()),
+            settings_source,
+            graph: Self::make_graph(),
+            model: primary,
+            alt_model: alt,
+            gen,
         }
     }
+
+    /// Create a new application seeded with a demo knowledge base and a stub
+    /// text model (fully offline). Equivalent to calling `with_models` with
+    /// defaults — used when no settings file is found.
+    pub fn new() -> Self {
+        Self::with_models(
+            Box::new(StubTextModel::new()),
+            None,
+            GenerationConfig::default(),
+            "built-in defaults".to_string(),
+        )
+    }
+
+    // ── model toggle ──────────────────────────────────────────────────────────
+
+    /// Whether a second model is available to toggle to with Ctrl+M.
+    pub fn can_toggle_model(&self) -> bool {
+        self.alt_model.is_some()
+    }
+
+    /// The name of the currently active text model.
+    pub fn active_model_name(&self) -> &str {
+        self.model.name()
+    }
+
+    /// Swap the active model with the alternate (no-op if no alternate exists).
+    pub fn toggle_chat_model(&mut self) {
+        if let Some(alt) = self.alt_model.as_mut() {
+            std::mem::swap(&mut self.model, alt);
+            self.output = format!(
+                "Switched to model: {}\n(Ctrl+M to switch back)",
+                self.model.name()
+            );
+        }
+    }
+
+    // ── mode / engine ─────────────────────────────────────────────────────────
 
     /// Advance to the next mode.
     pub fn next_mode(&mut self) {
@@ -115,6 +181,8 @@ impl App {
             EngineKind::Needle => EngineKind::Llm,
         };
     }
+
+    // ── submit ────────────────────────────────────────────────────────────────
 
     /// Handle a submitted input line according to the active mode.
     pub async fn submit(&mut self) {
@@ -136,7 +204,7 @@ impl App {
     }
 
     fn run_chat(&mut self, input: &str) -> model_hub::Result<String> {
-        self.model.generate(input, &GenerationConfig::default())
+        self.model.generate(input, &self.gen)
     }
 
     async fn run_rag(&mut self, query: &str) -> model_hub::Result<String> {
@@ -146,7 +214,7 @@ impl App {
                 &self.graph,
                 self.model.as_mut(),
                 query,
-                &GenerationConfig::default(),
+                &self.gen,
             )
             .await?;
         let mut out = format!("{}\n\nSources:\n", ans.answer);
@@ -171,17 +239,26 @@ impl App {
     fn render_info(&self) -> String {
         let _ = Orchestrator::default();
         let _ = PipelineConfig::default();
+        let alt_name = self
+            .alt_model
+            .as_ref()
+            .map(|m| m.name().to_string())
+            .unwrap_or_else(|| "none (Ctrl+M unavailable)".to_string());
         format!(
             "graphdb model hub TUI\n\
+             settings source:              {}\n\
              engine (tools/extract/embed): {}\n\
-             text model: {}\n\
-             documents in demo KB: {}\n\
-             chunks in demo KB: {}\n\
+             active text model:            {}\n\
+             alt text model:               {}\n\
+             documents in demo KB:         {}\n\
+             chunks in demo KB:            {}\n\
              gpu features: cuda={} metal={} mkl={}\n\n\
              Modes: Chat, RAG, Extract, System\n\
-             Keys: Tab switch mode, Ctrl+E toggle engine, Enter submit, Esc quit",
+             Keys: Tab switch mode, Ctrl+E toggle engine, Ctrl+M switch model, Enter submit, Esc quit",
+            self.settings_source,
             self.engine,
             self.model.name(),
+            alt_name,
             self.graph.document_count(),
             self.graph.chunk_count(),
             cfg!(feature = "cuda"),

@@ -1,11 +1,14 @@
 //! `graphdb-tui` — a terminal UI for the model-hub AI pipelines.
 //!
-//! Offers four modes (Chat, RAG, Extract, System) over a demo knowledge base,
-//! running fully offline with stub models. The tool-calling / extraction /
-//! embedding engine can be toggled at runtime between LLM and Needle (Ctrl+E).
+//! Offers four modes (Chat, RAG, Extract, System) over a demo knowledge base.
+//! On startup, reads `graphdb-agent.settings.json` (same discovery order as
+//! `graphdb-cli agent`) and, if a GGUF model path is configured, loads it as
+//! the primary text model. The offline stub is always available as a fallback
+//! and can be toggled at runtime with Ctrl+M (Chat mode only).
 
 mod app;
 mod events;
+mod settings;
 mod ui;
 
 use std::io::{self, Stdout};
@@ -19,6 +22,9 @@ use crossterm::terminal::{
 use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+
+use model_hub::models::text::StubTextModel;
+use model_hub::GenerationConfig;
 
 use crate::app::App;
 use crate::events::{handle_key, Action};
@@ -40,10 +46,67 @@ fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
+/// Try to load the GGUF model described in `settings`.
+///
+/// Returns `Some(model)` on success, `None` if the path is not configured or
+/// loading fails (a warning is printed to stderr before raw mode is entered).
+fn try_load_model(
+    s: &settings::TuiSettings,
+) -> Option<Box<dyn model_hub::TextModel>> {
+    let gguf = s.model_path()?;
+    let tok = s.tokenizer_path()?;
+
+    eprintln!("graphdb-tui: loading model {} …", gguf.display());
+
+    let device = match model_hub::resolve_device(s.device_kind()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("warning: device resolution failed ({e}); falling back to stub");
+            return None;
+        }
+    };
+
+    match model_hub::models::text::QuantizedLlama::load(&gguf, &tok, device) {
+        Ok(m) => {
+            eprintln!("graphdb-tui: model loaded successfully.");
+            Some(Box::new(m))
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: failed to load model {} — {e}; falling back to stub",
+                gguf.display()
+            );
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ── 1. Load settings and model BEFORE entering raw-mode so warnings are
+    //       visible in the normal terminal output. ──────────────────────────
+    let (s, source) = settings::TuiSettings::load();
+
+    let gen = if s.generation.temperature <= 0.0 {
+        GenerationConfig::deterministic().with_max_tokens(s.generation.max_tokens)
+    } else {
+        GenerationConfig::default()
+            .with_max_tokens(s.generation.max_tokens)
+            .with_temperature(s.generation.temperature)
+    };
+
+    // If the settings point to a real GGUF model, that becomes primary and the
+    // stub becomes the Ctrl+M alternate.  Otherwise the stub is primary and
+    // Ctrl+M is hidden.
+    let (primary, alt): (Box<dyn model_hub::TextModel>, Option<Box<dyn model_hub::TextModel>>) =
+        match try_load_model(&s) {
+            Some(real) => (real, Some(Box::new(StubTextModel::new()))),
+            None => (Box::new(StubTextModel::new()), None),
+        };
+
+    // ── 2. Enter raw / alternate-screen mode. ────────────────────────────────
     let mut terminal = setup_terminal()?;
-    let mut app = App::new();
+    let mut app = App::with_models(primary, alt, gen, source);
 
     let res = run(&mut terminal, &mut app).await;
 
