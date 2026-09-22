@@ -504,32 +504,58 @@ cargo run -p graphdb-cli -- \
 
 ### GPU Acceleration
 
-GPU backends are **off by default**. Enable them with cargo features:
+GPU backends are **off by default** to keep builds fast and portable. To enable GPU acceleration, you must **rebuild** with the corresponding Cargo feature flag — just passing `--device cuda` at runtime won't work if the binary wasn't compiled with GPU support.
+
+#### NVIDIA CUDA
 
 ```bash
-# NVIDIA CUDA:
-cargo run -p graphdb-cli --features cuda -- \
+# Build with CUDA support (one-time):
+cargo build -p graphdb-cli --features cuda --release
+
+# Then run with --device cuda:
+./target/release/graphdb-cli \
   --device cuda \
   --model /path/to/model.gguf \
   --tokenizer /path/to/tokenizer.json \
-  generate "..."
+  agent
 
-# Apple Metal:
-cargo run -p graphdb-cli --features metal -- \
+# Or via cargo run (rebuilds if needed):
+cargo run -p graphdb-cli --features cuda --release -- \
+  --device cuda \
+  --model /path/to/model.gguf \
+  --tokenizer /path/to/tokenizer.json \
+  agent
+```
+
+**Requirements:** CUDA toolkit 11.x or 12.x, cuDNN. Install via [NVIDIA's docs](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/).
+
+#### Apple Metal (M1/M2/M3)
+
+```bash
+# Build with Metal support (one-time):
+cargo build -p graphdb-cli --features metal --release
+
+# Then run with --device metal:
+./target/release/graphdb-cli \
   --device metal \
   --model /path/to/model.gguf \
   --tokenizer /path/to/tokenizer.json \
-  generate "..."
+  agent
 ```
 
-Available features (per crate):
-- `cuda` — NVIDIA GPU (via cuDNN)
-- `metal` — Apple GPU (M1/M2/M3)
-- `rocm` — AMD GPU (experimental)
-- `mkl` — Intel MKL (CPU acceleration)
-- `flash-attn` — Flash Attention 2 (CUDA only)
+**Requirements:** macOS 12.3+ with Apple Silicon. No additional setup needed.
 
-Without a feature flag, everything runs on CPU.
+#### Available Features
+
+| Feature | Backend | Notes |
+|---------|---------|-------|
+| `cuda` | NVIDIA GPU | via cuDNN; requires CUDA toolkit |
+| `metal` | Apple GPU | M1/M2/M3; macOS only |
+| `rocm` | AMD GPU | experimental; Linux only |
+| `mkl` | Intel MKL | CPU acceleration for x86 |
+| `flash-attn` | Flash Attention 2 | CUDA only; faster attention |
+
+> **Tip:** You can set `"device": "cuda"` in [`settings.json`](#configuration-settingsjson) so you never have to type the flag again — but remember the binary must still be compiled with `--features cuda`.
 
 ---
 

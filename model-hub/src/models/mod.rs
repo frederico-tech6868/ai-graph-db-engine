@@ -33,7 +33,11 @@ pub fn resolve_device(kind: DeviceKind) -> Result<Device> {
             }
             #[cfg(not(feature = "cuda"))]
             {
-                tracing::warn!("cuda feature not enabled; falling back to CPU");
+                tracing::warn!(
+                    "--device cuda requested but the `cuda` feature was not enabled at build time. \
+                     Rebuild with `cargo build --features cuda` to enable NVIDIA GPU acceleration. \
+                     Falling back to CPU."
+                );
                 Ok(Device::Cpu)
             }
         }
@@ -44,7 +48,11 @@ pub fn resolve_device(kind: DeviceKind) -> Result<Device> {
             }
             #[cfg(not(feature = "metal"))]
             {
-                tracing::warn!("metal feature not enabled; falling back to CPU");
+                tracing::warn!(
+                    "--device metal requested but the `metal` feature was not enabled at build time. \
+                     Rebuild with `cargo build --features metal` to enable Apple GPU acceleration. \
+                     Falling back to CPU."
+                );
                 Ok(Device::Cpu)
             }
         }
