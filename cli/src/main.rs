@@ -4,6 +4,11 @@
 //! the **LLM** or the **Needle** engine for tool calling, structured
 //! extraction, and text embeddings (via `--engine`). Point `--model`/`--tokenizer`
 //! at real GGUF weights to run a quantized Llama instead of the stub.
+//!
+//! The `agent` sub-command launches a Claude-Code-style interactive REPL. See
+//! [`agent`] for the full REPL implementation.
+
+mod agent;
 
 use std::path::PathBuf;
 
@@ -134,6 +139,18 @@ enum Commands {
     },
     /// Print system / build information.
     Info,
+    /// Launch the interactive Claude-Code-style agent REPL.
+    ///
+    /// The REPL classifies each task (Simple / Moderate / Complex), picks the
+    /// best matching skill, runs a visible tool-call trace, and prints the
+    /// composed answer. Slash commands: /help /skills /tools /context /ingest
+    /// /clear /quit.
+    Agent {
+        /// Directory of .rs / .md / .txt files to ingest into the knowledge
+        /// base at startup (in addition to the built-in demo context).
+        #[arg(long, value_name = "DIR")]
+        context_dir: Option<PathBuf>,
+    },
 }
 
 /// Build the text model: real GGUF Llama if paths are given, else the stub.
@@ -274,6 +291,15 @@ async fn main() -> Result<()> {
             println!("{}", audio.transcribe(&samples)?);
         }
         Commands::Info => print_info(&cli),
+        Commands::Agent { context_dir } => {
+            agent::run(agent::AgentConfig {
+                context_dir: context_dir.clone(),
+                model_path: cli.model.clone(),
+                tokenizer_path: cli.tokenizer.clone(),
+                device: cli.device.into(),
+            })
+            .await?;
+        }
     }
 
     Ok(())
