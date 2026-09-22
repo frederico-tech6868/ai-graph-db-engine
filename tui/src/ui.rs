@@ -36,13 +36,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         );
     f.render_widget(tabs, chunks[0]);
 
-    // Output area.
+    // Output area — title changes per mode to show the active model in Chat.
+    let output_title = match app.mode {
+        Mode::Chat => format!(" Chat — model: {} ", app.active_model_name()),
+        _ => format!(" Output — engine: {} ", app.engine),
+    };
     let output = Paragraph::new(app.output.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Output — engine: {} ", app.engine)),
-        )
+        .block(Block::default().borders(Borders::ALL).title(output_title))
         .wrap(Wrap { trim: false });
     f.render_widget(output, chunks[1]);
 
@@ -59,18 +59,24 @@ pub fn draw(f: &mut Frame, app: &App) {
     let cursor_y = chunks[2].y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 
-    // Footer help line.
-    let footer = Paragraph::new(Line::from(vec![
+    // Footer help line — Ctrl+M hint only shown when a model toggle is possible.
+    let mut footer_spans = vec![
         Span::styled("Tab", Style::default().fg(Color::Yellow)),
         Span::raw(" mode  "),
         Span::styled("Ctrl+E", Style::default().fg(Color::Yellow)),
         Span::raw(" engine  "),
+    ];
+    if app.can_toggle_model() {
+        footer_spans.push(Span::styled("Ctrl+M", Style::default().fg(Color::Yellow)));
+        footer_spans.push(Span::raw(" model  "));
+    }
+    footer_spans.extend([
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
         Span::raw(" submit  "),
         Span::styled("Esc/Ctrl+Q", Style::default().fg(Color::Yellow)),
         Span::raw(" quit"),
-    ]))
-    .dim();
+    ]);
+    let footer = Paragraph::new(Line::from(footer_spans)).dim();
     f.render_widget(footer, chunks[3]);
 }
 

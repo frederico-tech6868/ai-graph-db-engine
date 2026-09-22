@@ -25,6 +25,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
                 app.toggle_engine();
                 return Action::None;
             }
+            // Toggle between the GGUF model and the offline stub (Chat mode).
+            // Hidden from the footer when no real model was loaded.
+            KeyCode::Char('m') => {
+                app.toggle_chat_model();
+                return Action::None;
+            }
             _ => {}
         }
     }
