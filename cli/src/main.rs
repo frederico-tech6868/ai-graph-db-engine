@@ -9,6 +9,7 @@
 //! [`agent`] for the full REPL implementation.
 
 mod agent;
+mod settings;
 
 use std::path::PathBuf;
 
@@ -73,12 +74,34 @@ struct Cli {
     #[arg(long, global = true)]
     tokenizer: Option<PathBuf>,
 
-    /// Compute device.
-    #[arg(long, global = true, value_enum, default_value_t = Device::Cpu)]
-    device: Device,
+    /// Compute device. If omitted, falls back to settings.json then CPU.
+    #[arg(long, global = true, value_enum)]
+    device: Option<Device>,
+
+    /// Path to a settings.json (agent sub-command). Overrides auto-discovery.
+    #[arg(long, global = true, value_name = "FILE")]
+    settings: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
+}
+
+impl Cli {
+    /// The effective device: the CLI flag if given, else CPU. (For the `agent`
+    /// sub-command, settings.json can supply the device before this default.)
+    fn device_or_default(&self) -> Device {
+        self.device.unwrap_or(Device::Cpu)
+    }
+}
+
+/// Parse a device string from settings.json.
+fn parse_device(s: &str) -> Result<Device> {
+    match s.trim().to_lowercase().as_str() {
+        "cpu" => Ok(Device::Cpu),
+        "cuda" | "gpu" => Ok(Device::Cuda),
+        "metal" => Ok(Device::Metal),
+        other => anyhow::bail!("unknown device {other:?} (expected cpu, cuda, or metal)"),
+    }
 }
 
 #[derive(Subcommand)]
@@ -143,8 +166,11 @@ enum Commands {
     ///
     /// The REPL classifies each task (Simple / Moderate / Complex), picks the
     /// best matching skill, runs a visible tool-call trace, and prints the
-    /// composed answer. Slash commands: /help /skills /tools /context /ingest
-    /// /clear /quit.
+    /// composed answer. Slash commands: /help /settings /skills /tools /context
+    /// /ingest /clear /quit.
+    ///
+    /// Configuration is read from a settings.json (see --settings) with
+    /// precedence: CLI flag > settings.json > default.
     Agent {
         /// Directory of .rs / .md / .txt files to ingest into the knowledge
         /// base at startup (in addition to the built-in demo context).
@@ -157,7 +183,7 @@ enum Commands {
 fn build_model(cli: &Cli) -> Result<Box<dyn TextModel>> {
     match (&cli.model, &cli.tokenizer) {
         (Some(m), Some(t)) => {
-            let device = resolve_device(cli.device.into())?;
+            let device = resolve_device(cli.device_or_default().into())?;
             let model = QuantizedLlama::load(m, t, device)
                 .with_context(|| format!("loading GGUF model {}", m.display()))?;
             Ok(Box::new(model))
@@ -292,11 +318,31 @@ async fn main() -> Result<()> {
         }
         Commands::Info => print_info(&cli),
         Commands::Agent { context_dir } => {
+            // Load settings.json (or built-in defaults).
+            let (settings, source) = settings::AgentSettings::load(cli.settings.as_deref())?;
+
+            // Merge with precedence: CLI flag > settings.json > default.
+            let model_path = cli.model.clone().or_else(|| settings.model_path());
+            let tokenizer_path = cli.tokenizer.clone().or_else(|| settings.tokenizer_path());
+            let device: DeviceKind = match cli.device {
+                Some(d) => d.into(),
+                None => match &settings.model.device {
+                    Some(s) => parse_device(s)?.into(),
+                    None => DeviceKind::Cpu,
+                },
+            };
+            let context_dir = context_dir.clone().or_else(|| settings.context_dir_path());
+
             agent::run(agent::AgentConfig {
-                context_dir: context_dir.clone(),
-                model_path: cli.model.clone(),
-                tokenizer_path: cli.tokenizer.clone(),
-                device: cli.device.into(),
+                context_dir,
+                model_path,
+                tokenizer_path,
+                device,
+                max_tokens: settings.generation.max_tokens,
+                temperature: settings.generation.temperature,
+                skills_dir: settings.skills_dir_path(),
+                history_file: settings.history_path(),
+                settings_source: source,
             })
             .await?;
         }
@@ -317,7 +363,7 @@ fn resolve_schema(schema: &str) -> String {
 fn print_info(cli: &Cli) {
     println!("{}", "graphdb model hub".green().bold());
     println!("  version:   {}", env!("CARGO_PKG_VERSION"));
-    println!("  device:    {:?}", DeviceKind::from(cli.device));
+    println!("  device:    {:?}", DeviceKind::from(cli.device_or_default()));
     let backend = if cli.model.is_some() {
         "quantized-llama (GGUF)"
     } else {

@@ -15,3 +15,6 @@ webui_graph.json
 *.ppm
 generated.*
 .logs/
+
+# Local agent settings (keep the .example version tracked)
+/graphdb-agent.settings.json

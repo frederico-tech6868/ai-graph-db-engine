@@ -1,0 +1,14 @@
+{
+  "model": {
+    "path": null,
+    "tokenizer": null,
+    "device": "cpu"
+  },
+  "generation": {
+    "max_tokens": 256,
+    "temperature": 0.0
+  },
+  "skills_dir": null,
+  "context_dir": null,
+  "history_file": "~/.graphdb_agent_history"
+}

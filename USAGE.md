@@ -19,10 +19,20 @@ This guide covers how to **use** the graph-db-engine tools: the command-line int
 4. [Terminal UI (`graphdb-tui`)](#terminal-ui-graphdb-tui)
 5. [Model Selection](#model-selection)
    - [Default (Offline Stub)](#default-offline-stub)
+   - [What is `tokenizer.json`?](#what-is-tokenizerjson)
    - [Real Local GGUF Model](#real-local-gguf-model)
+   - [Where to Get Models](#where-to-get-models)
    - [GPU Acceleration](#gpu-acceleration)
-6. [Engine Selection (LLM vs. Needle)](#engine-selection-llm-vs-needle)
-7. [Python SDK](#python-sdk)
+6. [Configuration (`settings.json`)](#configuration-settingsjson)
+   - [Discovery Order & Precedence](#discovery-order--precedence)
+   - [Full Reference](#full-reference)
+   - [Common Recipes](#common-recipes)
+7. [Customizing & Extending](#customizing--extending)
+   - [Adding a New Skill](#adding-a-new-skill)
+   - [Adding a New Tool](#adding-a-new-tool)
+   - [Training a Needle Model for a Task](#training-a-needle-model-for-a-task)
+8. [Engine Selection (LLM vs. Needle)](#engine-selection-llm-vs-needle)
+9. [Python SDK](#python-sdk)
 
 ---
 
@@ -63,6 +73,7 @@ These flags apply to **all** subcommands (place them **before** the subcommand n
 | `--model <PATH>` | Path to a GGUF text model file | `None` (uses offline stub) |
 | `--tokenizer <PATH>` | Path to the matching `tokenizer.json` | `None` (required if `--model` is set) |
 | `--device <DEVICE>` | Compute device: `cpu`, `cuda`, `metal` | `cpu` |
+| `--settings <FILE>` | Path to a `settings.json` (used by the `agent` sub-command) | auto-discovered ([details](#configuration-settingsjson)) |
 
 **Example:**
 ```bash
@@ -167,6 +178,7 @@ cargo run -p graphdb-cli -- agent
 
 **Flags:**
 - `--context-dir <DIR>` — auto-ingest `.rs`/`.md`/`.txt` files from this directory at startup
+- `--settings <FILE>` — path to a `settings.json` (global flag; see [Configuration](#configuration-settingsjson))
 
 ---
 
@@ -203,7 +215,12 @@ cargo run -p graphdb-cli -- \
   --model /path/to/model.gguf \
   --tokenizer /path/to/tokenizer.json \
   agent
+
+# Using a settings.json (no repeated flags — see the Configuration section):
+cargo run -p graphdb-cli -- --settings ./graphdb-agent.settings.json agent
 ```
+
+> **Configure once, run simply.** Instead of passing `--model`/`--tokenizer`/`--context-dir` every time, put them in a [`settings.json`](#configuration-settingsjson) and just run `cargo run -p graphdb-cli -- agent`.
 
 ### Startup Banner
 
@@ -229,6 +246,7 @@ Type any of these at the `◆` prompt:
 | Command | Effect |
 |---------|--------|
 | `/help` | Show the full command table + routing table |
+| `/settings` | Show the effective configuration and where it was loaded from |
 | `/skills` | List loaded skills (name, description, trigger cues) |
 | `/tools` | List available tools with their parameters |
 | `/context` | Show how many documents and chunks are in the KB |
@@ -382,9 +400,29 @@ By default, **every command** runs with an **offline stub model** (`StubTextMode
 
 Perfect for testing pipelines, CI, and examples.
 
+### What is `tokenizer.json`?
+
+A language model does not read text directly — it reads **token IDs** (integers). The **tokenizer** is the component that converts your text into those IDs before the model runs, and converts the model's output IDs back into text.
+
+`tokenizer.json` is the **Hugging Face `tokenizers` format** — a single self-contained JSON file describing:
+
+- the **vocabulary** (every token the model knows → its integer ID),
+- the **merge rules** (for BPE-style tokenizers: how characters combine into tokens),
+- the **normalization / pre-tokenization** rules (lowercasing, whitespace handling, byte-level encoding), and
+- the **special tokens** (`<s>`, `</s>`, `<unk>`, padding, etc.).
+
+**Why it is a separate file from the model:** a `.gguf` file holds the model **weights** (the learned numbers), while `tokenizer.json` holds the **text↔ID mapping**. They must **match** — a model trained with one vocabulary will produce garbage if paired with a different tokenizer. Always download the `tokenizer.json` that ships with (or is referenced by) the specific model you are using.
+
+> **Tip:** If a model repo only provides `tokenizer.model` (SentencePiece) or split `vocab.json` + `merges.txt`, convert it to a single `tokenizer.json` with the Hugging Face `transformers` library:
+> ```python
+> from transformers import AutoTokenizer
+> tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
+> tok.save_pretrained("./out")   # writes ./out/tokenizer.json
+> ```
+
 ### Real Local GGUF Model
 
-To run a **real quantized Llama model**, pass `--model` and `--tokenizer`:
+To run a **real quantized Llama model**, pass `--model` and `--tokenizer` (or set them in [`settings.json`](#configuration-settingsjson)):
 
 ```bash
 cargo run -p graphdb-cli -- \
@@ -395,9 +433,46 @@ cargo run -p graphdb-cli -- \
 
 The CLI will load the GGUF file via `candle-transformers` and run genuine inference. The `--model`/`--tokenizer` flags apply globally to **all** subcommands (including `agent`, `rag`, `ask`, etc.).
 
-**Where to get GGUF models:**
-- [Hugging Face Hub](https://huggingface.co/models?other=gguf) — search for "GGUF" (e.g., `TheBloke/Llama-2-7B-GGUF`)
-- Download a `.gguf` file and the matching `tokenizer.json`
+### Where to Get Models
+
+GGUF is the quantized model format used by `llama.cpp` and supported here via `candle`. To swap in a real model:
+
+**1. Pick a GGUF model** from the [Hugging Face Hub](https://huggingface.co/models?library=gguf) (search the `GGUF` library filter). Good small options for CPU:
+- `bartowski/Llama-3.2-3B-Instruct-GGUF`
+- `TheBloke/Llama-2-7B-Chat-GGUF`
+- `Qwen/Qwen2.5-3B-Instruct-GGUF`
+
+**2. Download a quantization** (a single `.gguf` file). `Q4_K_M` is a good speed/quality balance:
+```bash
+pip install -U "huggingface_hub[cli]"
+
+# Download the weights (one .gguf file):
+huggingface-cli download bartowski/Llama-3.2-3B-Instruct-GGUF \
+  Llama-3.2-3B-Instruct-Q4_K_M.gguf \
+  --local-dir ~/models
+
+# Download the matching tokenizer.json (from the original, non-GGUF repo):
+huggingface-cli download meta-llama/Llama-3.2-3B-Instruct \
+  tokenizer.json --local-dir ~/models
+```
+
+**3. Point the agent at them:**
+```bash
+cargo run -p graphdb-cli -- \
+  --model ~/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf \
+  --tokenizer ~/models/tokenizer.json \
+  agent
+```
+…or set them once in [`settings.json`](#configuration-settingsjson) so you never have to type the flags again.
+
+**Quantization cheat-sheet** (smaller = faster + less RAM, but lower quality):
+
+| Suffix | Bits/weight | Use when |
+|--------|-------------|----------|
+| `Q2_K` / `Q3_K_S` | ~2–3 | Very tight RAM; noticeable quality loss |
+| `Q4_K_M` | ~4 | **Recommended default** — best balance |
+| `Q5_K_M` | ~5 | More quality, a bit slower |
+| `Q6_K` / `Q8_0` | 6–8 | Near-full quality; needs more RAM |
 
 ### GPU Acceleration
 
@@ -427,6 +502,282 @@ Available features (per crate):
 - `flash-attn` — Flash Attention 2 (CUDA only)
 
 Without a feature flag, everything runs on CPU.
+
+---
+
+## Configuration (`settings.json`)
+
+The `agent` REPL is **configured without recompiling** through a `settings.json` file. This is the recommended way to set a model, device, generation parameters, skills folder, and startup context — so you don't have to retype CLI flags every time.
+
+A ready-to-copy template ships in the repo: **[`graphdb-agent.settings.example.json`](graphdb-agent.settings.example.json)**.
+
+```bash
+# Copy the template and edit it:
+cp graphdb-agent.settings.example.json graphdb-agent.settings.json
+$EDITOR graphdb-agent.settings.json
+
+# The agent auto-discovers ./graphdb-agent.settings.json:
+cargo run -p graphdb-cli -- agent
+
+# Or point at any file explicitly:
+cargo run -p graphdb-cli -- --settings ~/my-agent.json agent
+```
+
+Inside the REPL, type **`/settings`** to see the effective configuration and where it was loaded from.
+
+### Discovery Order & Precedence
+
+The agent looks for a settings file in this order (first match wins):
+
+1. `--settings <path>` — explicit flag
+2. `$GRAPHDB_AGENT_SETTINGS` — environment variable
+3. `./graphdb-agent.settings.json` — current directory
+4. `~/.config/graphdb/agent.settings.json` — user config
+
+If none exist, built-in defaults apply (offline stub model, CPU).
+
+**Every value can still be overridden on the command line.** The precedence is:
+
+```
+CLI flag   >   settings.json   >   built-in default
+```
+
+For example, `--device cpu` on the command line wins over `"device": "cuda"` in the file. This lets you keep a stable config file and override just one thing for a single run.
+
+### Full Reference
+
+```json
+{
+  "model": {
+    "path": "~/models/llama-3.2-3b-instruct-q4_k_m.gguf",
+    "tokenizer": "~/models/tokenizer.json",
+    "device": "cpu"
+  },
+  "generation": {
+    "max_tokens": 512,
+    "temperature": 0.2
+  },
+  "skills_dir": "./my-skills",
+  "context_dir": "./src",
+  "history_file": "~/.graphdb_agent_history"
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `model.path` | string \| null | `null` | Path to a GGUF model file. `null` → offline stub model. |
+| `model.tokenizer` | string \| null | `null` | Path to the matching `tokenizer.json`. **Required when `model.path` is set.** |
+| `model.device` | string | `"cpu"` | Compute device: `"cpu"`, `"cuda"`, or `"metal"`. |
+| `generation.max_tokens` | integer | `256` | Maximum new tokens per answer. |
+| `generation.temperature` | number | `0.0` | Sampling temperature. `0.0` = greedy / deterministic. |
+| `skills_dir` | string \| null | `null` | Folder of `*/SKILL.md` skills. `null` → built-in `model-hub/examples/skills`. |
+| `context_dir` | string \| null | `null` | Directory whose `.rs`/`.md`/`.txt` files are ingested at startup. |
+| `history_file` | string \| null | `~/.graphdb_agent_history` | Persistent readline history file. |
+
+**Notes:**
+- Paths beginning with `~/` are expanded to your home directory.
+- Any field may be omitted — missing fields fall back to their default.
+- Unknown keys are **rejected** with a helpful error listing valid keys (catches typos early).
+
+### Common Recipes
+
+**Always use my local model (no flags needed):**
+```json
+{
+  "model": {
+    "path": "~/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+    "tokenizer": "~/models/tokenizer.json",
+    "device": "cpu"
+  }
+}
+```
+
+**Longer, more creative answers:**
+```json
+{ "generation": { "max_tokens": 1024, "temperature": 0.7 } }
+```
+
+**Work on a specific project with custom skills:**
+```json
+{
+  "context_dir": "~/projects/my-app/src",
+  "skills_dir": "~/projects/my-app/.graphdb-skills"
+}
+```
+
+---
+
+## Customizing & Extending
+
+The agent has three extension points, from easiest to most involved:
+
+| Add a... | Requires code? | Where |
+|----------|---------------|-------|
+| **Skill** | No — just a `SKILL.md` file | `skills_dir` folder |
+| **Tool** | Yes — Rust (schema + executor) | `model-hub/src/pipeline/tools.rs` |
+| **Trained Needle model** | No Rust — Python + JSONL data | `python/` (cactus-needle) |
+
+### Adding a New Skill
+
+Skills need **no code and no rebuild** — they are Markdown files discovered at startup. This is the easiest way to steer the agent's behaviour.
+
+**1. Create a folder + `SKILL.md`** in your `skills_dir` (default `model-hub/examples/skills/`):
+
+```bash
+mkdir -p model-hub/examples/skills/test-writer
+$EDITOR model-hub/examples/skills/test-writer/SKILL.md
+```
+
+**2. Write the skill** with `---` frontmatter followed by the instruction body:
+
+```markdown
+---
+name: test-writer
+description: Write unit tests for a piece of code.
+cues: test, unit test, write tests, coverage, assert, test case
+---
+When asked to write tests, produce a compact test module.
+- Ground every test in the retrieved code (real function names and signatures).
+- Cover the happy path plus at least one edge case (empty input, error path).
+- Use the project's existing test conventions if visible in the context.
+- Output only the test code in a fenced block, no prose padding.
+```
+
+**3. Restart the agent** and confirm it loaded:
+
+```
+◆ /skills
+```
+
+**How selection works:** for each task, the agent lowercases the input and counts how many of a skill's `cues` appear in it. The highest-scoring skill wins and its instruction body is injected into the LLM prompt (for Moderate/Complex tasks). If no cue matches, no skill is injected.
+
+**Frontmatter fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique skill name (shown in `/skills`, `✦ skill` trace). |
+| `description` | Yes | One-line summary (shown in `/skills`). |
+| `cues` | Yes | Comma-separated trigger phrases (lowercased, substring-matched). |
+| *(body)* | Yes | Everything after the closing `---`; injected into the LLM prompt. |
+
+> **Tip:** Make cues specific. Generic cues like `"code"` fire on almost everything and will crowd out more precise skills.
+
+### Adding a New Tool
+
+Tools are the actions the agent can take against the knowledge base (`search_knowledge_base`, `list_documents`, `get_document_chunks`). Adding one requires **three edits in Rust**, all in `model-hub/src/pipeline/tools.rs`.
+
+**1. Declare the schema** in `graphdb_tool_schemas()`:
+
+```rust
+ToolSchema::new(
+    "count_documents",
+    "Count how many documents are in the knowledge base.",
+)
+// .with_param("name", "type", "description", required)
+.with_param("doc_type", "string", "restrict the count to a document type", false),
+```
+
+**2. Implement execution** in `ToolExecutor::execute` — add a match arm that runs against the `GraphBackend` and returns JSON:
+
+```rust
+"count_documents" => {
+    let docs = graph.list_documents().await?;
+    let doc_type = call.arguments.get("doc_type").and_then(|d| d.as_str());
+    let count = match doc_type {
+        Some(t) => docs.iter().filter(|d| d.doc_type == t).count(),
+        None => docs.len(),
+    };
+    Ok(serde_json::json!({ "count": count }))
+}
+```
+
+**3. (Optional) Teach the Needle router** in `model-hub/src/needle/agent.rs` → `detect_tool()` so the deterministic engine can pick it without an LLM:
+
+```rust
+// count intents → count_documents
+if has("count_documents") && (q.contains("how many") || q.contains("count")) {
+    return Some(ToolCall {
+        name: "count_documents".to_string(),
+        arguments: json!({}),
+    });
+}
+```
+
+**4. Rebuild and verify:**
+```bash
+cargo build -p graphdb-cli
+cargo run -p graphdb-cli -- agent
+# ◆ /tools     ← your new tool should appear
+```
+
+**What the engines do with a tool:**
+- **LLM routing** (Complex tasks) automatically sees the new schema — it's serialized into the router prompt via `to_function_json()`, so no extra work is needed beyond step 1–2.
+- **Needle routing** (Simple/Moderate tasks) only picks tools it has heuristics for — hence the optional step 3.
+
+> The Rust `ToolSchema` list intentionally mirrors the Python `GRAPHDB_TOOL_SCHEMAS` in `python/ai_memory/needle_agent.py`. If you want the same tool available to trained Needle models, add a matching entry there too.
+
+### Training a Needle Model for a Task
+
+The **Needle engine** is deterministic (regex/heuristics) out of the box. For higher accuracy on *your* documents and phrasings, you can **train a compact Needle2 function-calling model** (via the `cactus-needle` library) on data generated from your own knowledge base. This is a **Python** workflow — no Rust required.
+
+> Needle2 is a small **embedded function-calling model** (not a chat LLM). Every response is a structured JSON tool call, or `[]` for off-topic queries. It is fine-tuned with LoRA adapters on JSONL data and exported to a `.cact` archive.
+
+**1. Install the training extras:**
+```bash
+pip install 'cactus-needle[train]'        # CPU
+pip install 'cactus-needle[train,gpu]'    # NVIDIA GPU
+pip install 'cactus-needle[train,metal]'  # Apple Silicon
+```
+
+**2. Ingest your documents into a knowledge group** and export training data (Python):
+```python
+from ai_memory.needle_agent import NeedleAgentGroup
+from ai_memory.embedder import LocalEmbedder
+from ai_memory.document_loader import DocumentLoader
+from graphdb.store import GraphStore
+
+group = NeedleAgentGroup(
+    name="my_docs",
+    store=GraphStore(),
+    embedder=LocalEmbedder(),
+    # small chunks → more positive examples to interleave off-topic ones
+    loader=DocumentLoader(chunk_size=200, min_chunk_len=20),
+    system="knowledge_group: my_docs; domain: my-project",
+)
+
+group.ingest(["docs/guide.md", "src/main.rs"])          # your files
+path = group.export_training_data("my_train.jsonl", k=200)
+print("wrote", path)
+```
+
+This produces **Needle-format JSONL**: each line has `tools`, `answers`, and `reasoning` fields. A configurable fraction (default **1-in-8**) are *off-topic* examples with `answers: []`, which teach the model **not** to call a tool on every query.
+
+**3. Fine-tune and build the `.cact` archive** (terminal):
+```bash
+needle finetune my_train.jsonl --epochs 20 --out my_adapter.pkl
+needle build checkpoints/needle2.pkl --lora my_adapter.pkl --out my.cact
+```
+
+**4. Load the trained weights and run live inference** (Python):
+```python
+group.load_weights("my.cact")
+result = group.run("How does vector search work?")
+print(result["type"], result["function_calls"], result["confidence"])
+```
+
+**5. (Optional) Route across multiple trained groups** with `NeedleOrchestrator` — each group specializes in its own document domain, and the orchestrator picks the best-matching group per query:
+```python
+from ai_memory.needle_agent import NeedleOrchestrator
+
+orch = NeedleOrchestrator(groups=[tech_group, research_group], embedder=LocalEmbedder())
+chosen = orch.route("What is LoRA?")   # → research_group
+```
+
+**Data-quality guidance** (from the shipped example): tool *selection* improves with a few hundred clean examples; argument *grounding* needs thousands of varied phrasings; keep ~1-in-8 off-topic examples so the model learns to stay silent when appropriate.
+
+See the full runnable walkthrough in [`python/examples/example_needle_agent.py`](python/examples/example_needle_agent.py) and the API reference in [python/SDK.md](python/SDK.md) (Needle2 Integration section).
+
+> **Note:** the trained `.cact` model is currently consumed by the **Python** Needle integration. The Rust `agent` REPL's Needle engine uses the built-in heuristics; wiring a trained `.cact` into the Rust REPL is not yet supported.
 
 ---
 
@@ -489,6 +840,8 @@ See [python/SDK.md](python/SDK.md) for the full API reference and [python/README
 - [python/SDK.md](python/SDK.md) — Python API reference
 - [model-hub/examples/](model-hub/examples/) — Example source code (`.rs` files)
 - [model-hub/examples/skills/](model-hub/examples/skills/) — Skill definitions (`.md` files)
+- [graphdb-agent.settings.example.json](graphdb-agent.settings.example.json) — Copy-ready `settings.json` template
+- [python/examples/example_needle_agent.py](python/examples/example_needle_agent.py) — Needle model training walkthrough
 
 ---
 

@@ -114,16 +114,30 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
-    /// Load skills. Tries the on-disk folder first; falls back to builtins.
-    pub fn load() -> Self {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()          // workspace root
-            .unwrap_or(Path::new("."))
-            .join("model-hub")
-            .join("examples")
-            .join("skills");
+    /// Load skills from `override_dir` if given (settings.json `skills_dir`),
+    /// otherwise the built-in `model-hub/examples/skills`. Falls back to the
+    /// baked-in skill set when the folder is missing or empty.
+    pub fn load_from(override_dir: Option<&Path>) -> Self {
+        let dir = match override_dir {
+            Some(d) => d.to_path_buf(),
+            None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent() // workspace root
+                .unwrap_or(Path::new("."))
+                .join("model-hub")
+                .join("examples")
+                .join("skills"),
+        };
         let mut skills = Self::load_dir(&dir);
-        if skills.is_empty() { skills = builtin_skills(); }
+        if skills.is_empty() {
+            if override_dir.is_some() {
+                eprintln!(
+                    "{} no skills found in {:?}; using built-in skills",
+                    "warning:".yellow(),
+                    dir
+                );
+            }
+            skills = builtin_skills();
+        }
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         Self { skills }
     }
@@ -356,6 +370,8 @@ fn format_result_deterministic(tool: Option<&str>, result: &Value) -> String {
 // ────────────────────────────── REPL ───────────────────────────────────────
 
 /// Configuration passed from the `Agent` CLI subcommand.
+///
+/// Values are already merged (CLI flag > settings.json > default) by `main.rs`.
 pub struct AgentConfig {
     /// Optional path to a directory whose `.rs`/`.md` files are ingested.
     pub context_dir: Option<PathBuf>,
@@ -365,6 +381,28 @@ pub struct AgentConfig {
     pub tokenizer_path: Option<PathBuf>,
     /// Compute device.
     pub device: DeviceKind,
+    /// Maximum new tokens per answer.
+    pub max_tokens: usize,
+    /// Sampling temperature (0.0 = deterministic).
+    pub temperature: f64,
+    /// Override skills directory. `None` → built-in location.
+    pub skills_dir: Option<PathBuf>,
+    /// Override readline history file. `None` → `~/.graphdb_agent_history`.
+    pub history_file: Option<PathBuf>,
+    /// Human-readable source of the settings (file path or "built-in defaults").
+    pub settings_source: String,
+}
+
+/// Effective, resolved configuration snapshot for the `/settings` command.
+struct EffectiveConfig {
+    model_name: String,
+    device: DeviceKind,
+    max_tokens: usize,
+    temperature: f64,
+    skills_dir: String,
+    context_dir: String,
+    history_file: String,
+    settings_source: String,
 }
 
 /// Entry point for `graphdb-cli agent`. Builds the graph/model, then runs the
@@ -390,21 +428,50 @@ pub async fn run(cfg: AgentConfig) -> Result<()> {
         ingested_by_dir = ingest_dir(&graph, dir);
     }
 
-    // ── Load skills. ────────────────────────────────────────────────────────
-    let skills = SkillRegistry::load();
+    // ── Load skills (settings.json override or built-in location). ───────────
+    let skills = SkillRegistry::load_from(cfg.skills_dir.as_deref());
 
     // ── Print banner. ────────────────────────────────────────────────────────
     print_banner(&graph, &skills, model.name(), ingested_by_dir);
 
     // ── REPL. ────────────────────────────────────────────────────────────────
-    let gen = GenerationConfig::deterministic().with_max_tokens(256);
+    let gen = if cfg.temperature <= 0.0 {
+        GenerationConfig::deterministic().with_max_tokens(cfg.max_tokens)
+    } else {
+        GenerationConfig::default()
+            .with_max_tokens(cfg.max_tokens)
+            .with_temperature(cfg.temperature)
+    };
     let mut rl = DefaultEditor::new().context("failed to initialize readline")?;
 
-    // Try to load persistent history from home dir.
-    let history_path = dirs_for_history();
+    // History file: settings.json override or default in home dir.
+    let history_path = cfg.history_file.clone().or_else(dirs_for_history);
     if let Some(ref hp) = history_path {
         let _ = rl.load_history(hp);
     }
+
+    // Snapshot the effective config for `/settings`.
+    let effective = EffectiveConfig {
+        model_name: model.name().to_string(),
+        device: cfg.device,
+        max_tokens: cfg.max_tokens,
+        temperature: cfg.temperature,
+        skills_dir: cfg
+            .skills_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(built-in)".to_string()),
+        context_dir: cfg
+            .context_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".to_string()),
+        history_file: history_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(disabled)".to_string()),
+        settings_source: cfg.settings_source.clone(),
+    };
 
     loop {
         let prompt = format!("{} ", "◆".bright_magenta().bold());
@@ -416,7 +483,7 @@ pub async fn run(cfg: AgentConfig) -> Result<()> {
 
                 // Slash commands.
                 if line.starts_with('/') {
-                    if handle_slash(&line, &graph, &skills) == SlashResult::Quit {
+                    if handle_slash(&line, &graph, &skills, &effective) == SlashResult::Quit {
                         break;
                     }
                     continue;
@@ -518,7 +585,12 @@ enum SlashResult {
     Quit,
 }
 
-fn handle_slash(line: &str, graph: &InMemoryGraph, skills: &SkillRegistry) -> SlashResult {
+fn handle_slash(
+    line: &str,
+    graph: &InMemoryGraph,
+    skills: &SkillRegistry,
+    effective: &EffectiveConfig,
+) -> SlashResult {
     let parts: Vec<&str> = line.splitn(4, ' ').collect();
     match parts[0] {
         "/quit" | "/exit" | "/q" => {
@@ -526,6 +598,7 @@ fn handle_slash(line: &str, graph: &InMemoryGraph, skills: &SkillRegistry) -> Sl
             return SlashResult::Quit;
         }
         "/help" => print_help(),
+        "/settings" => print_settings(effective),
         "/skills" => {
             println!("{}", "\nLoaded skills:".bold());
             println!("{}\n", skills.catalog());
@@ -590,6 +663,7 @@ fn print_help() {
     println!("{}", "Slash commands:".bold());
     let cmds = [
         ("/help",              "show this table"),
+        ("/settings",          "show the effective configuration (from settings.json)"),
         ("/skills",            "list loaded skills (name, description, cues)"),
         ("/tools",             "list registered tools with parameters"),
         ("/context",           "show documents and chunks in the knowledge base"),
@@ -605,6 +679,27 @@ fn print_help() {
     println!("  {:<12} {}", "SIMPLE".green().bold().to_string(),   "Needle tool only — no LLM");
     println!("  {:<12} {}", "MODERATE".yellow().bold().to_string(),"Needle route + LLM compose + skill");
     println!("  {:<12} {}", "COMPLEX".red().bold().to_string(),    "LLM route + LLM compose + skill");
+    println!();
+}
+
+/// Print the effective configuration for `/settings`.
+fn print_settings(c: &EffectiveConfig) {
+    println!();
+    println!("{}", "Effective settings:".bold());
+    println!("  {:<14} {}", "source".dimmed(), c.settings_source.bold());
+    println!("  {:<14} {}", "model".dimmed(), c.model_name.bold());
+    println!("  {:<14} {:?}", "device".dimmed(), c.device);
+    println!("  {:<14} {}", "max_tokens".dimmed(), c.max_tokens.to_string().bold());
+    println!("  {:<14} {}", "temperature".dimmed(), format!("{:.2}", c.temperature).bold());
+    println!("  {:<14} {}", "skills_dir".dimmed(), c.skills_dir);
+    println!("  {:<14} {}", "context_dir".dimmed(), c.context_dir);
+    println!("  {:<14} {}", "history_file".dimmed(), c.history_file);
+    println!();
+    println!(
+        "  {}",
+        "Edit settings.json and restart to change these (CLI flags override the file)."
+            .dimmed()
+    );
     println!();
 }
 
