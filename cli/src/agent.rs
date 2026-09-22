@@ -36,12 +36,15 @@
 //! | Command | Effect |
 //! |---------|--------|
 //! | `/help` | Print this table |
+//! | `/settings` | Show effective configuration (from settings.json) |
+//! | `/verbose` | Toggle tool-trace, routing header, and engine footer on/off |
+//! | `/memory` | Show token usage, KB size, and context-window stats |
 //! | `/skills` | List loaded skills (name, description, cues) |
 //! | `/tools` | List available tools |
 //! | `/context` | Show how many documents/chunks are in the KB |
-//! | `/ingest <path> <title>` | Read a file and add it to the KB |
+//! | `/ingest <path> [title]` | Read a file and add it to the KB |
 //! | `/clear` | Clear the terminal screen |
-//! | `/quit` / `/exit` | Exit the REPL |
+//! | `/quit` / `/exit` / `/q` | Exit the REPL |
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -283,6 +286,7 @@ async fn run_agent_turn(
     route_with_llm: bool,
     compose_with_llm: bool,
     gen: &GenerationConfig,
+    verbose: bool,
 ) -> model_hub::Result<(Option<String>, String)> {
     let schemas = graphdb_tool_schemas();
 
@@ -297,20 +301,26 @@ async fn run_agent_turn(
     // ── 2. Execute and print the trace. ─────────────────────────────────────
     let (tool_name, tool_result) = match &call {
         Some(c) => {
-            println!(
-                "  {} {}  {}({})",
-                "●".cyan(),
-                "tool_use".cyan().bold(),
-                c.name.bold(),
-                compact_json(&c.arguments).dimmed(),
-            );
+            if verbose {
+                println!(
+                    "  {} {}  {}({})",
+                    "●".cyan(),
+                    "tool_use".cyan().bold(),
+                    c.name.bold(),
+                    compact_json(&c.arguments).dimmed(),
+                );
+            }
             let result = ToolExecutor::execute(graph, c).await?;
-            let preview = truncate(&compact_json(&result), 120);
-            println!("  {} {}  {}", "└".cyan(), "tool_result".cyan(), preview.dimmed());
+            if verbose {
+                let preview = truncate(&compact_json(&result), 120);
+                println!("  {} {}  {}", "└".cyan(), "tool_result".cyan(), preview.dimmed());
+            }
             (Some(c.name.clone()), result)
         }
         None => {
-            println!("  {} {}  {}", "●".dimmed(), "tool_use".dimmed(), "(no tool selected)".dimmed());
+            if verbose {
+                println!("  {} {}  {}", "●".dimmed(), "tool_use".dimmed(), "(no tool selected)".dimmed());
+            }
             (None, Value::Null)
         }
     };
@@ -405,6 +415,26 @@ struct EffectiveConfig {
     settings_source: String,
 }
 
+/// Mutable REPL state, threaded through the loop and all slash handlers.
+struct ReplState {
+    /// Print tool-use traces, routing header, and engine footer.
+    /// Toggled by `/verbose`. Default: `true`.
+    verbose: bool,
+    /// Number of completed agent turns this session.
+    turns: usize,
+    /// Input tokens counted for the most-recent turn (exact when a real model
+    /// is loaded, 1-token≈4-char approximation for the stub).
+    last_prompt_tokens: usize,
+    /// Output tokens counted for the most-recent turn.
+    last_output_tokens: usize,
+    /// Cumulative input tokens across all turns this session.
+    total_prompt_tokens: u64,
+    /// Cumulative output tokens across all turns this session.
+    total_output_tokens: u64,
+    /// Frozen effective settings (for `/settings`).
+    effective: EffectiveConfig,
+}
+
 /// Entry point for `graphdb-cli agent`. Builds the graph/model, then runs the
 /// REPL until the user quits.
 pub async fn run(cfg: AgentConfig) -> Result<()> {
@@ -450,27 +480,35 @@ pub async fn run(cfg: AgentConfig) -> Result<()> {
         let _ = rl.load_history(hp);
     }
 
-    // Snapshot the effective config for `/settings`.
-    let effective = EffectiveConfig {
-        model_name: model.name().to_string(),
-        device: cfg.device,
-        max_tokens: cfg.max_tokens,
-        temperature: cfg.temperature,
-        skills_dir: cfg
-            .skills_dir
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(built-in)".to_string()),
-        context_dir: cfg
-            .context_dir
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(none)".to_string()),
-        history_file: history_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(disabled)".to_string()),
-        settings_source: cfg.settings_source.clone(),
+    // Build mutable REPL state (verbose on by default, zero token counters).
+    let mut state = ReplState {
+        verbose: true,
+        turns: 0,
+        last_prompt_tokens: 0,
+        last_output_tokens: 0,
+        total_prompt_tokens: 0,
+        total_output_tokens: 0,
+        effective: EffectiveConfig {
+            model_name: model.name().to_string(),
+            device: cfg.device,
+            max_tokens: cfg.max_tokens,
+            temperature: cfg.temperature,
+            skills_dir: cfg
+                .skills_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(built-in)".to_string()),
+            context_dir: cfg
+                .context_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none)".to_string()),
+            history_file: history_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(disabled)".to_string()),
+            settings_source: cfg.settings_source.clone(),
+        },
     };
 
     loop {
@@ -481,17 +519,17 @@ pub async fn run(cfg: AgentConfig) -> Result<()> {
                 if line.is_empty() { continue; }
                 let _ = rl.add_history_entry(&line);
 
-                // Slash commands.
+                // Slash commands — pass immutable model ref for token counting.
                 if line.starts_with('/') {
-                    if handle_slash(&line, &graph, &skills, &effective) == SlashResult::Quit {
+                    if handle_slash(&line, &graph, &skills, &*model, &mut state) == SlashResult::Quit {
                         break;
                     }
                     continue;
                 }
 
-                // Agent turn.
+                // Agent turn — needs mutable model for inference.
                 println!();
-                if let Err(e) = agent_turn(&graph, model.as_mut(), &line, &skills, &gen).await {
+                if let Err(e) = agent_turn(&graph, model.as_mut(), &line, &skills, &gen, &mut state).await {
                     eprintln!("{} {e}", "error:".red().bold());
                 }
                 println!();
@@ -523,6 +561,7 @@ async fn agent_turn(
     task: &str,
     skills: &SkillRegistry,
     gen: &GenerationConfig,
+    state: &mut ReplState,
 ) -> model_hub::Result<()> {
     let (difficulty, reason) = classify(task);
     let skill = skills.select(task);
@@ -530,44 +569,57 @@ async fn agent_turn(
     let route_llm   = matches!(difficulty, Difficulty::Complex);
     let compose_llm = !matches!(difficulty, Difficulty::Simple);
 
-    // ── Print turn header. ──────────────────────────────────────────────────
-    println!(
-        "  {} {}  {}",
-        "→".dimmed(),
-        difficulty.color_label(),
-        reason.dimmed()
-    );
-    if let Some(s) = skill {
+    // ── Print turn header (gated on verbose). ──────────────────────────────
+    if state.verbose {
         println!(
-            "  {} skill  {}",
-            "✦".magenta(),
-            s.name.magenta().bold()
+            "  {} {}  {}",
+            "→".dimmed(),
+            difficulty.color_label(),
+            reason.dimmed()
         );
+        if let Some(s) = skill {
+            println!(
+                "  {} skill  {}",
+                "✦".magenta(),
+                s.name.magenta().bold()
+            );
+        }
+        println!();
     }
-    println!();
 
     // ── Tool loop + compose. ────────────────────────────────────────────────
     let (tool_name, answer) = run_agent_turn(
-        graph, model, task, skill, route_llm, compose_llm, gen,
+        graph, model, task, skill, route_llm, compose_llm, gen, state.verbose,
     ).await?;
 
-    // ── Engine label. ───────────────────────────────────────────────────────
-    let tool = tool_name.as_deref().unwrap_or("none");
-    match difficulty {
-        Difficulty::Simple => println!(
-            "  {}  {} → {} route → deterministic",
-            "handled by".dimmed(), "needle".green(), tool.green()
-        ),
-        Difficulty::Moderate => println!(
-            "  {}  {} route → {} → {} compose",
-            "handled by".dimmed(), "needle".green(), tool.green(), model.name().yellow()
-        ),
-        Difficulty::Complex => println!(
-            "  {}  {} route → {} → {} compose",
-            "handled by".dimmed(), model.name().yellow(), tool.yellow(), model.name().yellow()
-        ),
-    };
-    println!();
+    // ── Engine label (gated on verbose). ───────────────────────────────────
+    if state.verbose {
+        let tool = tool_name.as_deref().unwrap_or("none");
+        match difficulty {
+            Difficulty::Simple => println!(
+                "  {}  {} → {} route → deterministic",
+                "handled by".dimmed(), "needle".green(), tool.green()
+            ),
+            Difficulty::Moderate => println!(
+                "  {}  {} route → {} → {} compose",
+                "handled by".dimmed(), "needle".green(), tool.green(), model.name().yellow()
+            ),
+            Difficulty::Complex => println!(
+                "  {}  {} route → {} → {} compose",
+                "handled by".dimmed(), model.name().yellow(), tool.yellow(), model.name().yellow()
+            ),
+        };
+        println!();
+    }
+
+    // ── Token accounting. ───────────────────────────────────────────────────
+    let pt = model.count_tokens(task);
+    let ot = model.count_tokens(&answer);
+    state.last_prompt_tokens = pt;
+    state.last_output_tokens = ot;
+    state.total_prompt_tokens += pt as u64;
+    state.total_output_tokens += ot as u64;
+    state.turns += 1;
 
     // ── Answer. ─────────────────────────────────────────────────────────────
     for line in answer.lines() {
@@ -589,7 +641,8 @@ fn handle_slash(
     line: &str,
     graph: &InMemoryGraph,
     skills: &SkillRegistry,
-    effective: &EffectiveConfig,
+    model: &dyn TextModel,
+    state: &mut ReplState,
 ) -> SlashResult {
     let parts: Vec<&str> = line.splitn(4, ' ').collect();
     match parts[0] {
@@ -598,7 +651,13 @@ fn handle_slash(
             return SlashResult::Quit;
         }
         "/help" => print_help(),
-        "/settings" => print_settings(effective),
+        "/settings" => print_settings(&state.effective),
+        "/verbose" => {
+            state.verbose = !state.verbose;
+            let status = if state.verbose { "on".green() } else { "off".yellow() };
+            println!("\n  {} verbose output {}\n", "◈".cyan(), status.bold());
+        }
+        "/memory" => print_memory(graph, model, state),
         "/skills" => {
             println!("{}", "\nLoaded skills:".bold());
             println!("{}\n", skills.catalog());
@@ -662,14 +721,16 @@ fn print_help() {
     println!();
     println!("{}", "Slash commands:".bold());
     let cmds = [
-        ("/help",              "show this table"),
-        ("/settings",          "show the effective configuration (from settings.json)"),
-        ("/skills",            "list loaded skills (name, description, cues)"),
-        ("/tools",             "list registered tools with parameters"),
-        ("/context",           "show documents and chunks in the knowledge base"),
+        ("/help",                  "show this table"),
+        ("/settings",              "show the effective configuration (from settings.json)"),
+        ("/verbose",               "toggle tool-trace, routing, and engine output on/off"),
+        ("/memory",                "show token usage, KB size, and context-window stats"),
+        ("/skills",                "list loaded skills (name, description, cues)"),
+        ("/tools",                 "list registered tools with parameters"),
+        ("/context",               "show documents and chunks in the knowledge base"),
         ("/ingest <path> [title]", "read a file and add it to the knowledge base"),
-        ("/clear",             "clear the terminal screen"),
-        ("/quit  /exit  /q",   "exit the REPL"),
+        ("/clear",                 "clear the terminal screen"),
+        ("/quit  /exit  /q",       "exit the REPL"),
     ];
     for (cmd, desc) in &cmds {
         println!("  {:<28} {}", cmd.cyan().to_string(), desc.dimmed());
@@ -700,6 +761,64 @@ fn print_settings(c: &EffectiveConfig) {
         "Edit settings.json and restart to change these (CLI flags override the file)."
             .dimmed()
     );
+    println!();
+}
+
+/// Print knowledge-base size, per-turn and cumulative token usage, and
+/// context-window occupancy for `/memory`.
+fn print_memory(graph: &InMemoryGraph, model: &dyn TextModel, state: &ReplState) {
+    let doc_count   = graph.document_count();
+    let chunk_count = graph.chunk_count();
+    // Rough estimate: average chunk ≈ 200 tokens.
+    let kb_tokens   = chunk_count * 200;
+
+    println!();
+    println!("{}", "Memory & context usage:".bold());
+    println!(
+        "  {:<20} {} docs / {} chunks  (~{} est. tokens)",
+        "knowledge base".dimmed(),
+        doc_count.to_string().bold(),
+        chunk_count.to_string().bold(),
+        kb_tokens.to_string().bold(),
+    );
+    println!(
+        "  {:<20} {} in + {} out = {} tokens",
+        "last turn".dimmed(),
+        state.last_prompt_tokens.to_string().bold(),
+        state.last_output_tokens.to_string().bold(),
+        (state.last_prompt_tokens + state.last_output_tokens).to_string().bold(),
+    );
+    println!(
+        "  {:<20} {} turns | {} in | {} out tokens",
+        "session totals".dimmed(),
+        state.turns.to_string().bold(),
+        state.total_prompt_tokens.to_string().bold(),
+        state.total_output_tokens.to_string().bold(),
+    );
+    match model.context_length() {
+        Some(ctx) => {
+            let last_used = state.last_prompt_tokens;
+            let pct = if ctx > 0 {
+                (last_used as f64 / ctx as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "  {:<20} {} tokens — {} used ({:.1}%)",
+                "context window".dimmed(),
+                ctx.to_string().bold(),
+                last_used.to_string().bold(),
+                pct,
+            );
+        }
+        None => {
+            println!(
+                "  {:<20} {}",
+                "context window".dimmed(),
+                "(unknown — no model loaded or metadata unavailable)".dimmed(),
+            );
+        }
+    }
     println!();
 }
 

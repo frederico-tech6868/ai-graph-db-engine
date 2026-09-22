@@ -69,6 +69,23 @@ pub trait TextModel: Send {
 
     /// A short human-readable identifier for the loaded model.
     fn name(&self) -> &str;
+
+    /// Approximate token count for `text`.
+    ///
+    /// Real model implementations should override this using their actual
+    /// tokenizer for accurate counts. The default uses the common
+    /// 1 token ≈ 4 chars rule of thumb.
+    fn count_tokens(&self, text: &str) -> usize {
+        (text.len() + 3) / 4
+    }
+
+    /// Maximum context window in tokens, if the model exposes it.
+    ///
+    /// Returns `None` for stub models or when the information is not available
+    /// in the loaded checkpoint's metadata.
+    fn context_length(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A speech-to-text model.
