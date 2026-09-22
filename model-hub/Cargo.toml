@@ -1,0 +1,37 @@
+[package]
+name = "model-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Pure-Rust AI model hub & pipeline (RAG, tool-calling, structured extraction) for graphdb-engine"
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+rocm = ["cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+flash-attn = ["cuda", "dep:candle-flash-attn", "candle-transformers/flash-attn"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+uuid.workspace = true
+
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+candle-flash-attn = { version = "0.9", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.4", features = ["tokio"] }
+schemars = { version = "0.8", features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
