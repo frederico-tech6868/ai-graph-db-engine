@@ -38,6 +38,7 @@ cargo build -p graphdb_rs --example jepa_world_model
 | [`transcription`](model-hub/examples/transcription.rs) | `model-hub` | Speech-to-text | `AudioModel` | `StubAudioModel` | Whisper |
 | [`web_scraping`](model-hub/examples/web_scraping.rs) | `model-hub` | HTML → text/links → KB | `WebScraper` | pure-Rust | + `reqwest` for live fetch |
 | [`image_segmentation`](model-hub/examples/image_segmentation.rs) | `model-hub` | Per-pixel segmentation | `ImageSegmenter` | `StubImageSegmenter` | Segment Anything (SAM) |
+| [`claude_code_agent`](model-hub/examples/claude_code_agent.rs) | `model-hub` | Multi-agent coding assistant: difficulty router + skills + tool calling | `TextModel` | `StubTextModel` | quantized Llama (GGUF) |
 
 ---
 
@@ -136,6 +137,47 @@ cargo run -p model-hub --example image_segmentation
 Production: implement `ImageSegmenter` on top of **Segment Anything (SAM)**
 (`candle_transformers::models::segment_anything`) for prompt-driven instance
 masks.
+
+## 8. Claude-Code agent (multi-agent + skills + tool calling)
+
+A coding assistant in the spirit of **Claude Code**, grounded in this codebase.
+It brings together three ideas:
+
+1. **A main orchestrator that delegates by difficulty.** Each task is classified
+   into `Simple` / `Moderate` / `Complex` and routed across two engines — the
+   deterministic **Needle** engine for cheap work and a **local LLM** for hard
+   reasoning:
+
+   | Difficulty | Route tool with | Compose answer with | Skill injected |
+   |------------|-----------------|---------------------|----------------|
+   | `Simple`   | Needle          | deterministic (no LLM) | no          |
+   | `Moderate` | Needle          | local LLM              | yes         |
+   | `Complex`  | local LLM       | local LLM              | yes         |
+
+2. **Tool calling.** An explicit, visible tool-use loop over the
+   `graphdb_tool_schemas` registry (`search_knowledge_base`, `list_documents`,
+   `get_document_chunks`). Each turn prints the `tool_use` call and a preview of
+   the `tool_result`, then composes the answer from it.
+
+3. **Skills.** Reusable instruction "folders" on disk under
+   [`examples/skills/<name>/SKILL.md`](model-hub/examples/skills), each with a
+   description, trigger `cues`, and an instruction body. The best-matching skill
+   for a task is injected into the LLM prompt — the same pattern as Claude Code's
+   Agent Skills. Add a skill by dropping in a new `SKILL.md`; no code changes.
+
+```bash
+# fully offline (deterministic Needle + stub LLM):
+cargo run -p model-hub --example claude_code_agent
+
+# with a real local model (quantized Llama GGUF):
+GRAPHDB_MODEL=/path/to/model.gguf \
+GRAPHDB_TOKENIZER=/path/to/tokenizer.json \
+cargo run -p model-hub --example claude_code_agent
+```
+
+> With the default offline stub the LLM tiers emit placeholder prose (tool
+> results are still real); plug in a GGUF via the two env vars for real answers
+> on the Moderate/Complex tiers.
 
 ---
 
